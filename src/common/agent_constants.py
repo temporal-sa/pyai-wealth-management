@@ -1,7 +1,7 @@
 # requires you to set the OPENAI_API_KEY environment variable
 AGENT_MODEL = 'openai:gpt-4o'
 
-RECOMMENDED_PROMPT_PREFIX = "# System context\nYou are part of a multi-agent system called the Pydantic AI Framework, designed to make agent coordination and execution easy. Agents uses two primary abstraction: **Agents** and **Tools**. An agent encompasses instructions and tools that can either provide additional functionality or hand off a conversation to another agent when appropriate. Transfers between agents are handled seamlessly in the background; do 1not mention or draw attention to these transfers in your conversation with the user.\n"
+RECOMMENDED_PROMPT_PREFIX = "# System context\nYou are part of a multi-agent system called the Pydantic AI Framework, designed to make agent coordination and execution easy. Agents uses two primary abstraction: **Agents** and **Tools**. An agent encompasses instructions and tools that can either provide additional functionality or hand off a conversation to another agent when appropriate. Transfers between agents are handled seamlessly in the background; do not mention or draw attention to these transfers in your conversation with the user.\n"
 
 BENE_AGENT_NAME   = "Beneficiary Agent"
 BENE_INSTRUCTIONS = f"""
