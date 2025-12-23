@@ -20,10 +20,13 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.info("Wealth Management Pydantic Chatbot Example Starting")
 
-### Chat History
-class ChatMessage(TypedDict):
-    role: Literal['user', 'model']
-    content: str
+### Debug Configuration
+DEBUG_MODE = False  # Set to True to see handoff routing debug messages
+
+def debug_print(message: str):
+    """Print debug messages only when DEBUG_MODE is enabled"""
+    if DEBUG_MODE:
+        print(message)
 
 ### Dependencies
 @dataclass
@@ -455,7 +458,7 @@ async def open_investment(context: RunContext[AgentDependencies],
         client_id=context.deps.client_id,
         name=name, 
         balance=balance)
-        
+
     return investment_mgr.add_investment_account(investment_account)
 
 @investment_agent.tool
@@ -484,18 +487,15 @@ async def handoff_to_supervisor(context: RunContext[AgentDependencies]) -> Hando
 async def main():
     print("Welcome to ABC Wealth Management. How can I help you?")
     agent_deps = AgentDependencies()
-    chat_messages : List[ChatMessage] = []
     message_history : List[ModelMessage] = []
     current_agent = supervisor_agent
     current_agent_name = "Supervisor Agent"
     pending_input: str | None = None # What to feed into the agent this iteration
 
     while True:
-        # Display current agent
-        print(f"\n[Current Agent: {current_agent_name}]")
-
+        # Get user input with current agent displayed on same line
         if pending_input is None:
-            user_input = input("Enter your message: ")
+            user_input = input(f"\n[{current_agent_name}] Enter your message: ")
         else:
             user_input = pending_input
             pending_input = None
@@ -513,11 +513,11 @@ async def main():
         # Pre-check: Force handoff for cross-domain requests
         should_force_handoff = False
         if current_agent_name == INVESTMENT_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['beneficiary', 'beneficiaries']):
-            print(f"\n>>> Forced handoff detected: Investment agent cannot handle beneficiary requests")
+            debug_print(f"\n>>> Forced handoff detected: Investment agent cannot handle beneficiary requests")
             should_force_handoff = True
             handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=agent_deps.client_id)
         elif current_agent_name == BENEFICIARY_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['investment', 'account']):
-            print(f"\n>>> Forced handoff detected: Beneficiary agent cannot handle investment requests")
+            debug_print(f"\n>>> Forced handoff detected: Beneficiary agent cannot handle investment requests")
             should_force_handoff = True
             handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=agent_deps.client_id)
         else:
@@ -530,7 +530,7 @@ async def main():
 
         if handoff and handoff.next_agent:
             if not should_force_handoff:
-                print(f"\n>>> Handoff detected: Switching from {current_agent_name} to {handoff.next_agent}")
+                debug_print(f"\n>>> Handoff detected: Switching from {current_agent_name} to {handoff.next_agent}")
 
             if handoff.next_agent == BENEFICIARY_AGENT_NAME:
                 agent_deps = AgentDependencies(client_id=handoff.client_id)
@@ -555,9 +555,6 @@ async def main():
             else:
                 raise ValueError(f"unknown next agent type {handoff.next_agent}")
 
-            # Immediately run the agent with a trigger message to process the history
-            print(f"\n[Current Agent: {current_agent_name}]")
-
             # Loop to handle chain handoffs
             while True:
                 result = await current_agent.run(trigger_message, deps=agent_deps, message_history=message_history)
@@ -570,7 +567,7 @@ async def main():
                 handoff = getattr(result.output, "handoff", None)
                 if handoff and handoff.next_agent:
                     # There's a chain handoff! Continue routing without printing
-                    print(f"\n>>> Chain handoff detected: Continuing to {handoff.next_agent}")
+                    debug_print(f"\n>>> Chain handoff detected: Continuing to {handoff.next_agent}")
 
                     # Set up the next agent in the chain
                     if handoff.next_agent == BENEFICIARY_AGENT_NAME:
@@ -591,7 +588,6 @@ async def main():
                     else:
                         raise ValueError(f"unknown next agent type {handoff.next_agent}")
 
-                    print(f"\n[Current Agent: {current_agent_name}]")
                     # Continue the loop to process the next agent
                 else:
                     # No more handoffs, print the final response and break
