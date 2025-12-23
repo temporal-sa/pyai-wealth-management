@@ -49,15 +49,6 @@ class WealthManagmentAgentOutput(BaseModel):
     handoff: Optional[HandoffInformation] = None
     """ Provides handoff details if another agent needs to process this request """
 
-class BeneficiaryAgentOutput(BaseModel):
-    response: str
-    """ Response to the client """
-    client_id: Optional[str] = None
-    """ Set if we have been given one """
-    need_more_info: bool = False
-    """ Set if more information is needed from the client """
-
-
 ### Agents
 AGENT_MODEL = 'openai:gpt-4.1'
 
