@@ -153,6 +153,8 @@ async def get_client_id(context: RunContext[AgentDependencies]) -> str:
     Returns:
         The stored client_id if available, or a message indicating it's not set.
     """
+    debug_print(f"Retrieveing client id {context.deps.client_id}")
+
     if context.deps.client_id:
         return f"Client ID is already set to: {context.deps.client_id}"
     else:
@@ -166,33 +168,34 @@ async def set_client_id(context: RunContext[AgentDependencies], client_id: str) 
     Args:
         client_id: The client ID provided by the user (e.g., "12345", "c-01922", "client_abc")
     """
+
     if not client_id or client_id.strip() == "":
         return "ERROR: Cannot set empty client_id. Ask the user for their client_id."
 
     context.deps.client_id = client_id
+
+    debug_print(f"****>>> Deps.client id is now set to {context.deps.client_id}")
     return f"Client ID set to: {client_id}"
 
 @supervisor_agent.tool
-async def handoff_to_beneficiary_agent(context: RunContext[AgentDependencies]) -> HandoffInformation:
+async def handoff_to_beneficiary_agent(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
     """
     Hand off to the beneficiary agent to handle beneficiary-related requests.
-    Uses the client_id from the context dependencies.
+    Requires that the client_id is passed in as a parameter
     """
-    client_id = context.deps.client_id
-
+    
     if not client_id or client_id.strip() == "":
         raise ValueError("client_id is required before handoff!")
 
     return HandoffInformation(next_agent=BENE_AGENT_NAME, client_id=client_id)
 
 @supervisor_agent.tool
-async def handoff_to_investment_agent(context: RunContext[AgentDependencies]) -> HandoffInformation:
+async def handoff_to_investment_agent(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
     """
     Hand off to the investment agent to handle investment-related requests.
-    Uses the client_id from the context dependencies.
+    Requires that the client_id is passed in as a parameter
     """
-    client_id = context.deps.client_id
-
+    
     if not client_id or client_id.strip() == "":
         raise ValueError("client_id is required before handoff!")
 
@@ -207,7 +210,8 @@ async def add_beneficiaries(
 
 @beneficiary_agent.tool
 async def list_beneficiaries(
-        context: RunContext[AgentDependencies]
+        context: RunContext[AgentDependencies], 
+        client_id: str
 ) -> list:
     """
     List the beneficiaries for the given client id.
@@ -221,17 +225,15 @@ async def delete_beneficiaries(
         beneficiaries_mgr.delete_beneficiary(context.deps.client_id, beneficiary_id)
 
 @beneficiary_agent.tool
-async def handoff_to_supervisor(context: RunContext[AgentDependencies]) -> HandoffInformation:
+async def handoff_to_supervisor(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
     """
     Hand off back to the supervisor agent when the request is not beneficiary-related.
     Use this when the user asks about investments, general questions, or other non-beneficiary topics.
     """
-    client_id = context.deps.client_id
-
     if not client_id or client_id.strip() == "":
         raise ValueError("client_id is required before handoff!")
 
-    return HandoffInformation(next_agent="Supervisor Agent", client_id=client_id)
+    return HandoffInformation(next_agent=SUPERVISOR_AGENT_NAME, client_id=client_id)
 
 @investment_agent.tool
 async def list_investments(context: RunContext[AgentDependencies]) -> list:
@@ -265,13 +267,11 @@ async def close_investment(context: RunContext[AgentDependencies],
         investment_id=investment_id)
 
 @investment_agent.tool
-async def handoff_to_supervisor(context: RunContext[AgentDependencies]) -> HandoffInformation:
+async def handoff_to_supervisor(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
     """
     Hand off back to the supervisor agent when the request is not investment-related.
     Use this when the user asks about beneficiaries, general questions, or other non-investment topics.
     """
-    client_id = context.deps.client_id
-
     if not client_id or client_id.strip() == "":
         raise ValueError("client_id is required before handoff!")
 
@@ -405,10 +405,6 @@ async def main():
                 elif current_agent_name == INVEST_AGENT_NAME:
                     validated_response = validate_investment_response(validated_response)
                 print(validated_response)
-
-        
-
-        
         
 if __name__ == "__main__":
      asyncio.run(main())
