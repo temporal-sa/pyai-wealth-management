@@ -16,7 +16,7 @@ Scenarios currently implmeneted include
 ## Application Architecture
 The overall application architecture looks like this:
 
-TODO: Include an Image
+![](../../images/application-architecture.png)
 
 There is a React UX which is where the customer interacts with the application. 
 The React UX leverages an API which exposes endpoints to start a workflow, send a prompt,
@@ -95,6 +95,16 @@ npm start
 ```
 
 A new browser window opens where you can interact with the application. 
+
+Here is a screenshot of the UX walking through a few scenarios:
+
+![](../../images/ux-chat-session.png)
+
+Here is a sample event history shown in the Temporal UX
+
+![](../../images/temporal-ux-session.png)
+
+### Running from the command line
 
 Alternatively you can interact with workflow using the temporal CLI 
 

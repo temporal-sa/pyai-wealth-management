@@ -6,7 +6,7 @@ with multiple agents working together. It leverages the supervisor pattern to "h
 You will find a version of just using the Pydantic AI Framework and another version
 that leverages [Temporal](https://temporal.io) to wrap the agentic flow with Temporal.
 
-TODO: include an architecture image
+![](images/architecture.png)
 
 The vanilla Pydantic AI framework version of this example is located [here](src/py_supervisor/README.md).
 
