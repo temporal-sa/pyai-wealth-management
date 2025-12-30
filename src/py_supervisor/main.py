@@ -1,11 +1,13 @@
 import asyncio
 import uuid
 import logging
+import datetime
 
 from typing import Optional, TypedDict, List, Literal
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, RunContext, ModelMessage
+from pydantic_ai import Agent, AgentRunResult, RunContext, ModelMessage
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from dataclasses import dataclass
 
 from common.agent_constants import SUPERVISOR_AGENT_NAME, SUPERVISOR_INSTRUCTIONS, BENE_AGENT_NAME, BENE_INSTRUCTIONS, INVEST_AGENT_NAME, INVEST_INSTRUCTIONS
@@ -183,7 +185,7 @@ async def handoff_to_beneficiary_agent(context: RunContext[AgentDependencies], c
     Hand off to the beneficiary agent to handle beneficiary-related requests.
     Requires that the client_id is passed in as a parameter
     """
-    
+
     if not client_id or client_id.strip() == "":
         raise ValueError("client_id is required before handoff!")
 
@@ -277,119 +279,124 @@ async def handoff_to_supervisor(context: RunContext[AgentDependencies], client_i
 
     return HandoffInformation(next_agent="Supervisor Agent", client_id=client_id)
 
-async def main():
-    print("Welcome to ABC Wealth Management. How can I help you?")
-    agent_deps = AgentDependencies()
-    message_history : List[ModelMessage] = []
-    current_agent = supervisor_agent
-    current_agent_name = SUPERVISOR_AGENT_NAME
-    pending_input: str | None = None # What to feed into the agent this iteration
 
-    while True:
-        # Get user input with current agent displayed on same line
-        if pending_input is None:
-            user_input = input(f"\n[{current_agent_name}] Enter your message: ")
-        else:
-            user_input = pending_input
-            pending_input = None
+class PydanticAIWealthManagement:
+    def __init__(self):
+        self.agent_deps = AgentDependencies()
+        self.message_history : List[ModelMessage] = []
+        self.current_agent = supervisor_agent
+        self.current_agent_name = SUPERVISOR_AGENT_NAME
+        self.pending_input: str | None = None # What to feed into the agent this iteration
 
-        lower_input = user_input.lower() if user_input is not None else ""
-        if lower_input in {"exit","end","quit"}:
-            break
+    async def run_agent_loop(self):
+        while True:
+            # Get user input with current agent displayed on same line
+            if self.pending_input is None:
+                user_input = input(f"\n[{self.current_agent_name}] Enter your message: ")
+            else:
+                user_input = pending_input
+                self.pending_input = None
 
+            lower_input = user_input.lower() if user_input is not None else ""
+            if lower_input in {"exit","end","quit"}:
+                break
+
+            await self._process_user_message(user_input)
+
+    async def _process_user_message(self, user_input: str):
+        debug_print(f"Processing user message of {user_input}")
         # Add user input to history before running agent
-        from pydantic_ai.messages import ModelRequest, UserPromptPart
-        import datetime
-        user_message = ModelRequest(parts=[UserPromptPart(content=user_input, timestamp=datetime.datetime.now(datetime.timezone.utc))])
-        message_history.append(user_message)
 
-        # Pre-check: Force handoff for cross-domain requests
+        user_message = ModelRequest(parts=[UserPromptPart(content=user_input, timestamp=datetime.datetime.now(datetime.timezone.utc))])
+        self.message_history.append(user_message)
+
+        should_force_handoff, handoff, result = await self._check_for_forced_handoff(user_input)
+
+        await self._handle_handoffs(should_force_handoff, handoff, result)
+
+    async def _check_for_forced_handoff(self, user_input: str):
         should_force_handoff = False
-        if current_agent_name == INVEST_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['beneficiary', 'beneficiaries']):
+        result = None
+        if self.current_agent_name == INVEST_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['beneficiary', 'beneficiaries']):
             debug_print(f"\n>>> Forced handoff detected: Investment agent cannot handle beneficiary requests")
             should_force_handoff = True
-            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=agent_deps.client_id)
-        elif current_agent_name == BENE_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['investment', 'account']):
+            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=self.agent_deps.client_id)
+        elif self.current_agent_name == BENE_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['investment', 'account']):
             debug_print(f"\n>>> Forced handoff detected: Beneficiary agent cannot handle investment requests")
             should_force_handoff = True
-            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=agent_deps.client_id)
+            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=self.agent_deps.client_id)
         else:
-            result = await current_agent.run(user_input, deps=agent_deps,
-                message_history=message_history)
+            result = await self.current_agent.run(user_input, deps=self.agent_deps,
+                message_history=self.message_history)
             # Append new messages to history instead of replacing
             new_messages = result.new_messages()
-            message_history.extend(new_messages)
+            self.message_history.extend(new_messages)
             handoff = getattr(result.output, "handoff", None)
 
+        debug_print(f"returning {should_force_handoff}, {handoff}, {result}")
+
+        return should_force_handoff, handoff, result
+
+    def _set_handoff_agent(self, handoff: HandoffInformation) -> str:
+        trigger_message = ""
+        debug_print("We have a handoff and a next agent set...")
+
+        if handoff.next_agent == BENE_AGENT_NAME:
+            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
+            self.current_agent = beneficiary_agent
+            self.current_agent_name = BENE_AGENT_NAME
+            trigger_message = "Process the user's beneficiary request from the conversation history. CRITICAL: You do NOT have access to investment data. If the user asks about investments, you MUST call handoff_to_supervisor() with NO response text."
+
+        elif handoff.next_agent == INVEST_AGENT_NAME:
+            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
+            self.current_agent = investment_agent
+            self.current_agent_name = INVEST_AGENT_NAME
+            trigger_message = "Process the user's investment request from the conversation history. CRITICAL: You do NOT have access to beneficiary data. If the user asks about beneficiaries, you MUST call handoff_to_supervisor() with NO response text."
+
+        elif handoff.next_agent == "Supervisor Agent":
+            # Handoff back to supervisor - keep client_id in deps
+            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
+            self.current_agent = supervisor_agent
+            self.current_agent_name = SUPERVISOR_AGENT_NAME
+            # Look at the most recent user message to understand what they want
+            trigger_message = "The user has a new request. Check the most recent user message in the conversation history and route it to the appropriate agent."
+
+        else:
+            raise ValueError(f"unknown next agent type {handoff.next_agent}")
+
+        return trigger_message
+
+
+    async def _handle_handoffs(self, should_force_handoff: bool, handoff: HandoffInformation, result: AgentRunResult):
         if handoff and handoff.next_agent:
             if not should_force_handoff:
-                debug_print(f"\n>>> Handoff detected: Switching from {current_agent_name} to {handoff.next_agent}")
+                debug_print(f"\n>>> Handoff detected: Switching from {self.current_agent_name} to {handoff.next_agent}")
 
-            if handoff.next_agent == BENE_AGENT_NAME:
-                agent_deps = AgentDependencies(client_id=handoff.client_id)
-                current_agent = beneficiary_agent
-                current_agent_name = BENE_AGENT_NAME
-                trigger_message = "Process the user's beneficiary request from the conversation history. CRITICAL: You do NOT have access to investment data. If the user asks about investments, you MUST call handoff_to_supervisor() with NO response text."
-
-            elif handoff.next_agent == INVEST_AGENT_NAME:
-                agent_deps = AgentDependencies(client_id=handoff.client_id)
-                current_agent = investment_agent
-                current_agent_name = INVEST_AGENT_NAME
-                trigger_message = "Process the user's investment request from the conversation history. CRITICAL: You do NOT have access to beneficiary data. If the user asks about beneficiaries, you MUST call handoff_to_supervisor() with NO response text."
-
-            elif handoff.next_agent == "Supervisor Agent":
-                # Handoff back to supervisor - keep client_id in deps
-                agent_deps = AgentDependencies(client_id=handoff.client_id)
-                current_agent = supervisor_agent
-                current_agent_name = SUPERVISOR_AGENT_NAME
-                # Look at the most recent user message to understand what they want
-                trigger_message = "The user has a new request. Check the most recent user message in the conversation history and route it to the appropriate agent."
-
-            else:
-                raise ValueError(f"unknown next agent type {handoff.next_agent}")
+            trigger_message = self._set_handoff_agent(handoff)
 
             # Loop to handle chain handoffs
             while True:
-                result = await current_agent.run(trigger_message, deps=agent_deps, message_history=message_history)
+                result = await self.current_agent.run(trigger_message, deps=self.agent_deps, message_history=self.message_history)
 
                 # Append new messages from agent
                 new_messages = result.new_messages()
-                message_history.extend(new_messages)
+                self.message_history.extend(new_messages)
 
                 # Check if there's another handoff (chain routing)
                 handoff = getattr(result.output, "handoff", None)
                 if handoff and handoff.next_agent:
                     # There's a chain handoff! Continue routing without printing
                     debug_print(f"\n>>> Chain handoff detected: Continuing to {handoff.next_agent}")
-
-                    # Set up the next agent in the chain
-                    if handoff.next_agent == BENE_AGENT_NAME:
-                        agent_deps = AgentDependencies(client_id=handoff.client_id)
-                        current_agent = beneficiary_agent
-                        current_agent_name = BENE_AGENT_NAME
-                        trigger_message = "Process the user's beneficiary request from the conversation history. CRITICAL: You do NOT have access to investment data. If the user asks about investments, you MUST call handoff_to_supervisor() with NO response text."
-                    elif handoff.next_agent == INVEST_AGENT_NAME:
-                        agent_deps = AgentDependencies(client_id=handoff.client_id)
-                        current_agent = investment_agent
-                        current_agent_name = INVEST_AGENT_NAME
-                        trigger_message = "Process the user's investment request from the conversation history. CRITICAL: You do NOT have access to beneficiary data. If the user asks about beneficiaries, you MUST call handoff_to_supervisor() with NO response text."
-                    elif handoff.next_agent == SUPERVISOR_AGENT_NAME:
-                        agent_deps = AgentDependencies(client_id=handoff.client_id)
-                        current_agent = supervisor_agent
-                        current_agent_name = SUPERVISOR_AGENT_NAME
-                        trigger_message = "The user has a new request. Check the most recent user message in the conversation history and route it to the appropriate agent."
-                    else:
-                        raise ValueError(f"unknown next agent type {handoff.next_agent}")
-
+                    trigger_message = self._set_handoff_agent(handoff)
                     # Continue the loop to process the next agent
                 else:
                     # No more handoffs, print the final response and break
                     if result.output.response:
                         # Validate and correct response based on agent type
                         validated_response = result.output.response
-                        if current_agent_name == BENE_AGENT_NAME:
+                        if self.current_agent_name == BENE_AGENT_NAME:
                             validated_response = validate_beneficiary_response(validated_response)
-                        elif current_agent_name == INVEST_AGENT_NAME:
+                        elif self.current_agent_name == INVEST_AGENT_NAME:
                             validated_response = validate_investment_response(validated_response)
                         print(validated_response)
                     # current_agent, current_agent_name, and agent_deps are already set correctly
@@ -400,11 +407,17 @@ async def main():
             if not should_force_handoff and result.output.response:
                 # Validate and correct response based on agent type
                 validated_response = result.output.response
-                if current_agent_name == BENE_AGENT_NAME:
+                if self.current_agent_name == BENE_AGENT_NAME:
                     validated_response = validate_beneficiary_response(validated_response)
-                elif current_agent_name == INVEST_AGENT_NAME:
+                elif self.current_agent_name == INVEST_AGENT_NAME:
                     validated_response = validate_investment_response(validated_response)
                 print(validated_response)
+
+async def main():
+    print("Welcome to ABC Wealth Management. How can I help you?")
+    wealth_management_flow = PydanticAIWealthManagement()
+    await wealth_management_flow.run_agent_loop()
+    print("Agent loop complete.")
         
 if __name__ == "__main__":
      asyncio.run(main())
