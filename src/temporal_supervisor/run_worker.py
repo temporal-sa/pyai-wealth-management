@@ -12,6 +12,7 @@ from pydantic_ai.durable_exec.temporal import (
 )
 
 from common.client_helper import ClientHelper
+from temporal_supervisor.activities.event_stream_activities import EventStreamActivities
 from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 
 async def main():
@@ -31,6 +32,11 @@ async def main():
         task_queue=client_helper.taskQueue, 
         workflows=[
             WealthManagementWorkflow,
+        ],
+        activities=[
+            EventStreamActivities.append_chat_interaction,
+            EventStreamActivities.append_status_update,
+            EventStreamActivities.delete_conversation,
         ],
     )
 

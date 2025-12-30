@@ -1,6 +1,8 @@
 import asyncio
+from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 from pydantic_ai import Agent, ModelMessage
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -22,7 +24,9 @@ from py_supervisor.main import (
 ) 
 
 from common.agent_constants import SUPERVISOR_AGENT_NAME, BENE_AGENT_NAME, INVEST_AGENT_NAME
-from common.user_message import ProcessUserMessageInput
+from common.user_message import ProcessUserMessageInput, ChatInteraction
+
+from temporal_supervisor.activities.event_stream_activities import EventStreamActivities
 
 SUPERVISOR_AGENT_TOOL_ACTIVITY_CONFIG: dict[str, dict[str, ActivityConfig | Literal[False]]] = {
     "set_client_id": False,
@@ -46,6 +50,57 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         self.current_agent = temporal_super_agent
         self.current_agent_name = SUPERVISOR_AGENT_NAME
         self.pending_input: str | None = None # What to feed into the agent this iteration
+
+    @workflow.run
+    async def run(self):
+        while True:
+            workflow.logger.info("At the top of the loop - waiting for messages or status updates")
+
+            # wait for a queue item or end workflow
+            await workflow.wait_condition(
+                lambda: not self.pending_chat_messages.empty() or self.end_workflow
+            )
+
+            if self.end_workflow:
+                workflow.logger.info("Ending workflow.")
+                return
+
+            # process chat messages
+            user_input = None
+            if not self.pending_chat_messages.empty():
+                user_input = self.pending_chat_messages.get_nowait()
+                workflow.logger.info(f"Message pulled from queue is {user_input}")
+
+            chat_interaction = ChatInteraction(
+                user_prompt=user_input,
+                text_response=""
+            )
+
+            await self._process_user_message(chat_interaction=chat_interaction, 
+                user_input=user_input)
+
+            # save the history in Redis
+            await workflow.execute_local_activity(
+                EventStreamActivities.append_chat_interaction,
+                args=[workflow.info().workflow_id, chat_interaction],
+                schedule_to_close_timeout=timedelta(seconds=5),
+                retry_policy=RetryPolicy(initial_interval=timedelta(seconds=1),
+                        backoff_coefficient=2,
+                        maximum_interval=timedelta(seconds=30))
+            )
+
+    @workflow.query
+    def get_chat_history(self) -> list[ModelMessage]:
+        return self.message_history
+
+    @workflow.signal
+    async def end_workflow(self):
+        self.end_workflow = True
+
+    @workflow.signal
+    async def process_user_message(self, message_input: ProcessUserMessageInput):
+        workflow.logger.info(f"processing user message {message_input}")
+        await self.pending_chat_messages.put(message_input.user_input)
 
     async def _check_for_forced_handoff(self, user_input: str):
         should_force_handoff = False
@@ -101,8 +156,9 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
         return trigger_message  
 
-    async def _handle_handoffs(self, should_force_handoff: bool, handoff: HandoffInformation, result: WealthManagementWorkflow.result):
+    async def _handle_handoffs(self, should_force_handoff: bool, handoff: HandoffInformation, result: WealthManagementWorkflow.result) -> str:
         workflow.logger.info(f"in _handle_handoffs {should_force_handoff} {handoff}")
+        response = ""
         if handoff and handoff.next_agent:
             trigger_message = await self._set_handoff_agent(handoff)
 
@@ -133,6 +189,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                         elif self.current_agent_name == INVEST_AGENT_NAME:
                             validated_response = validate_investment_response(validated_response)
                         print(validated_response)
+                        response = validated_response
                     # current_agent, current_agent_name, and agent_deps are already set correctly
                     # These will be used for the next user input in the outer loop
                     break
@@ -147,8 +204,11 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                 elif self.current_agent_name == INVEST_AGENT_NAME:
                     validated_response = validate_investment_response(validated_response)
                 print(validated_response)
+                response = validated_response
 
-    async def _process_user_message(self, user_input: str):
+        return response
+
+    async def _process_user_message(self, chat_interaction: ChatInteraction, user_input: str):
         workflow.logger.info(f"Processing user message of {user_input}")
 
         # Add user input to history before running agent
@@ -160,39 +220,8 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
         # do set up any handoffs that are necessary
 
-        await self._handle_handoffs(should_force_handoff, handoff, result)
+        response = await self._handle_handoffs(should_force_handoff, handoff, result)
 
-    @workflow.run
-    async def run(self):
-        while True:
-            workflow.logger.info("At the top of the loop - waiting for messages or status updates")
-
-            # wait for a queue item or end workflow
-            await workflow.wait_condition(
-                lambda: not self.pending_chat_messages.empty() or self.end_workflow
-            )
-
-            if self.end_workflow:
-                workflow.logger.info("Ending workflow.")
-                return
-
-            # process chat messages
-            user_input = None
-            if not self.pending_chat_messages.empty():
-                user_input = self.pending_chat_messages.get_nowait()
-                workflow.logger.info(f"Message pulled from queue is {user_input}")
-
-            await self._process_user_message(user_input)
-
-    @workflow.query
-    def get_chat_history(self) -> list[ModelMessage]:
-        return self.message_history
-
-    @workflow.signal
-    async def end_workflow(self):
-        self.end_workflow = True
-
-    @workflow.signal
-    async def process_user_message(self, message_input: ProcessUserMessageInput):
-        workflow.logger.info(f"processing user message {message_input}")
-        await self.pending_chat_messages.put(message_input.user_input)
+        # update the chat interaction
+        workflow.logger.info("Getting ready to set response to {response}")
+        chat_interaction.text_response = response
