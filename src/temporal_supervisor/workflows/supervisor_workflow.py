@@ -188,7 +188,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                             validated_response = validate_beneficiary_response(validated_response)
                         elif self.current_agent_name == INVEST_AGENT_NAME:
                             validated_response = validate_investment_response(validated_response)
-                        print(validated_response)
+                        workflow.logger.info(validated_response)
                         response = validated_response
                     # current_agent, current_agent_name, and agent_deps are already set correctly
                     # These will be used for the next user input in the outer loop
@@ -203,7 +203,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                     validated_response = validate_beneficiary_response(validated_response)
                 elif self.current_agent_name == INVEST_AGENT_NAME:
                     validated_response = validate_investment_response(validated_response)
-                print(validated_response)
+                workflow.logger.info(validated_response)
                 response = validated_response
 
         return response
