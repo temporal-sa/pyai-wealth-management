@@ -29,9 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     task_queue = client_helper.taskQueue
     print(f"Listening on {client_helper.address} task queue {task_queue}")
     temporal_client = await Client.connect(
-        target_host=client_helper.address,
-        namespace=client_helper.namespace,
-        tls=client_helper.get_tls_config(),
+        **client_helper.client_config,
         plugins=[
             PydanticAIPlugin(),
         ]

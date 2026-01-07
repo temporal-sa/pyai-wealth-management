@@ -15,16 +15,16 @@ from common.client_helper import ClientHelper
 from temporal_supervisor.activities.event_stream_activities import EventStreamActivities
 from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 
+from temporalio.envconfig import ClientConfig
+
 async def main():
     logging.basicConfig(level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(filename)s:%(lineno)s | %(message)s")
     
     client_helper = ClientHelper()
-    plugins = [ PydanticAIPlugin()]
+    plugins = [ PydanticAIPlugin() ]
     print(f"address is {client_helper.address} and plugins are {plugins}")
-    client = await Client.connect(target_host=client_helper.address,
-                                  namespace=client_helper.namespace,
-                                  tls=client_helper.get_tls_config(),
+    client = await Client.connect(**client_helper.client_config,
                                   plugins=plugins)
 
     worker = Worker(
