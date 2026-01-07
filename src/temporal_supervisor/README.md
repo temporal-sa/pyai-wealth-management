@@ -68,12 +68,16 @@ export REDIS_HOST=localhost
 export REDIS_PORT=6379
 ```
 
+In a terminal, run the Temporal Server locally.
+
 ## Running the Demo Locally
 Start Temporal Locally.
 
 ```bash
 temporal server start-dev
 ```
+
+In another terminal, start the worker.
 
 ### Start the Worker
 
@@ -82,12 +86,17 @@ cd src/temporal_supervisor
 ./startlocalworker.sh
 ```
 
+In another terminal, start the REST API.
+
 ### Start the API
 
 ```bash
 cd src/temporal_supervisor/api
 ./startlocalapi.sh
 ```
+
+And in another terminal, start the UX. 
+
 ### Start the UX
 ```bash
 cd src/temporal_supervisor/frontend
@@ -135,3 +144,47 @@ temporal workflow signal --workflow-id ai-chat --name process_user_message --inp
 # ends the workflow execution
 temporal workflow signal --workflow-id ai-chat --name end_workflow
 ```
+
+## Running the Demo in Temporal Cloud
+
+Copy the setcloudenv.example, located in the src/temporal_supervisor folder to the project root and name it setcloudenv.sh .
+
+```bash
+cp  src/temporal_supervisor/setcloudenv.example setcloudenv.sh
+```
+
+Edit setcloudenv.sh to match your Temporal Cloud account:
+```bash
+export TEMPORAL_ADDRESS=<namespace>.<accountID>.tmprl.cloud:7233
+export TEMPORAL_NAMESPACE=<namespace>.<accountID>
+export TEMPORAL_TLS_CLIENT_CERT_PATH="/path/to/cert.pem"
+export TEMPORAL_TLS_CLIENT_KEY_PATH="/path/to/key.key"
+```
+
+### Start the Worker
+
+In a terminal, start the worker, using Temporal Cloud:
+
+```bash
+cd src/temporal_supervisor
+./startcloudworker.sh
+```
+
+### Start the API
+
+In another terminal, start the API using Temporal Cloud
+
+```bash
+cd src/api
+./startcloudapi.sh
+```
+
+And in another terminal, start the UX:
+
+### Start the UX
+```bash
+cd src/frontend
+npm start
+```
+
+A new browser window opens where you can interact with the application. 
