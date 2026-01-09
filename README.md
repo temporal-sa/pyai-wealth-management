@@ -51,4 +51,4 @@ export OPENAI_API_KEY=sk-proj-....
 See the Pydantic AI Framework version [here](src/py_supervisor/README.md)
 And the Temporal version of this example [here](src/temporal_supervisor/README.md)
 
-
+Stay tuned! More to come!
