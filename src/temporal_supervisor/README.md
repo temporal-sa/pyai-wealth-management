@@ -184,6 +184,7 @@ And in another terminal, start the UX:
 ### Start the UX
 ```bash
 cd src/frontend
+npm install
 npm start
 ```
 

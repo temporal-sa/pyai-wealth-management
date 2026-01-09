@@ -15,6 +15,7 @@ communicates with Temporal running locally or in the cloud.
 
 ## Install Dependencies
 ```bash
+cd src/frontend
 npm install
 ```
 
