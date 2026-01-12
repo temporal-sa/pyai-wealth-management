@@ -1,4 +1,6 @@
 #!/bin/bash
 source ../../setoaikey.sh
 source ../../setcloudenv.sh
+# set the python path up to the src folder to avoid Error while finding module specification 
+export PYTHONPATH="${PYTHONPATH}:../../src"
 uv run uvicorn api.main:app --reload
