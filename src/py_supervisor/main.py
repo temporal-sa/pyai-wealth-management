@@ -1,14 +1,12 @@
 import asyncio
-import uuid
 import logging
 import datetime
 
-from typing import Optional, TypedDict, List, Literal
-
-from pydantic import BaseModel
-from pydantic_ai import Agent, AgentRunResult, RunContext, ModelMessage
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from typing import Optional, List
 from dataclasses import dataclass
+
+from pydantic_ai import Agent, RunContext, ModelMessage, ModelRetry
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from common.agent_constants import SUPERVISOR_AGENT_NAME, SUPERVISOR_INSTRUCTIONS, BENE_AGENT_NAME, BENE_INSTRUCTIONS, INVEST_AGENT_NAME, INVEST_INSTRUCTIONS
 from common.beneficiaries_manager import BeneficiariesManager
@@ -34,22 +32,247 @@ def debug_print(message: str):
 @dataclass
 class AgentDependencies:
     client_id: Optional[str] = None
+    next_agent: Optional[str] = None  # Signals routing to another agent
+    trigger_message: Optional[str] = None  # Message for next agent
+    current_agent_name: str = SUPERVISOR_AGENT_NAME  # For debugging/logging
 
-### Handoff Details
-class HandoffInformation(BaseModel):
-    next_agent: "str"
-    """ What agent to run next """
-    client_id: str
-    """ What client to use """
+### Output Functions
 
-### Output classes
-class WealthManagmentAgentOutput(BaseModel):
-    response: Optional[str] = None
-    """ Response to the client - only provide if NOT handing off """
-    client_id: Optional[str] = None
-    """ Set if we have been given one """
-    handoff: Optional[HandoffInformation] = None
-    """ Provides handoff details if another agent needs to process this request """
+# Supervisor Agent Output Functions
+async def respond_to_user(ctx: RunContext[AgentDependencies], response: str) -> str:
+    """
+    Respond directly to the user when no specialized agent is needed.
+    Use this for greetings, general questions, or when asking for client_id.
+
+    Args:
+        response: Your response to the user
+    """
+    debug_print(f"[{ctx.deps.current_agent_name}] Responding to user")
+    return response
+
+async def route_to_beneficiary_agent(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+    """
+    Route to the beneficiary agent for beneficiary-related requests.
+    This function signals the handoff - the main loop will execute it.
+
+    Args:
+        client_id: The client's ID (must be provided)
+    """
+    try:
+        if not client_id or client_id.strip() == "":
+            raise ValueError("client_id is required for routing to beneficiary agent")
+
+        debug_print(f"[{ctx.deps.current_agent_name}] Routing to {BENE_AGENT_NAME}")
+
+        ctx.deps.client_id = client_id
+        ctx.deps.next_agent = BENE_AGENT_NAME
+        ctx.deps.trigger_message = "Process the user's beneficiary request from the conversation history."
+
+        return ""  # Empty response - routing happens in main loop
+    except Exception as e:
+        logger.error(f"Error in route_to_beneficiary_agent: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
+
+async def route_to_investment_agent(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+    """
+    Route to the investment agent for investment-related requests.
+    This function signals the handoff - the main loop will execute it.
+
+    Args:
+        client_id: The client's ID (must be provided)
+    """
+    try:
+        if not client_id or client_id.strip() == "":
+            raise ValueError("client_id is required for routing to investment agent")
+
+        debug_print(f"[{ctx.deps.current_agent_name}] Routing to {INVEST_AGENT_NAME}")
+
+        ctx.deps.client_id = client_id
+        ctx.deps.next_agent = INVEST_AGENT_NAME
+        ctx.deps.trigger_message = "Process the user's investment request from the conversation history."
+
+        return ""  # Empty response - routing happens in main loop
+    except Exception as e:
+        logger.error(f"Error in route_to_investment_agent: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
+
+# Beneficiary Agent Output Functions
+async def respond_about_beneficiaries(ctx: RunContext[AgentDependencies], response: str) -> str:
+    """
+    Respond to the user about beneficiary matters.
+    Only use this for beneficiary-related responses.
+    Keep responses concise and professional.
+
+    Args:
+        response: Your response about beneficiaries
+    """
+    try:
+        debug_print(f"[{ctx.deps.current_agent_name}] Responding about beneficiaries")
+
+        # Check if this is a confirmation request (should not validate format)
+        is_confirmation_request = (
+            'are you sure' in response.lower() and
+            'confirm' in response.lower()
+        )
+
+        # Check if this looks like a beneficiary list response
+        # (contains "beneficiar" and mentions names/relationships)
+        is_list_response = (
+            'beneficiar' in response.lower() and
+            ('(' in response and ')' in response) and  # Has relationship in parentheses
+            not is_confirmation_request  # Don't validate confirmation requests
+        )
+
+        if is_list_response:
+            # Validate format - MUST use numbered list
+            if not any(line.strip().startswith(('1.', '2.', '3.', '4.')) for line in response.split('\n')):
+                raise ModelRetry(
+                    "CRITICAL FORMAT ERROR: You are listing beneficiaries but NOT using numbered format. "
+                    "You MUST use this EXACT format:\n\n"
+                    "Here are your current beneficiaries:\n\n"
+                    "1. [Name] ([Relationship])\n"
+                    "2. [Name] ([Relationship])\n\n"
+                    "Would you like to add, remove or list your beneficiaries?\n\n"
+                    "DO NOT use comma-separated format like 'John Doe (son), Jane Doe (daughter)'"
+                )
+
+            # Check for forbidden words
+            forbidden_words = ['update', 'edit', 'modify', 'change', 'manage', 'further', 'let me know', 'if you need']
+            response_lower = response.lower()
+
+            for word in forbidden_words:
+                if word in response_lower:
+                    raise ModelRetry(
+                        f"Response contains forbidden word '{word}'. You MUST use EXACTLY this ending: "
+                        "'Would you like to add, remove or list your beneficiaries?' "
+                        "Do NOT use: update, edit, modify, change, manage, or phrases like 'let me know'."
+                    )
+
+            # Check for required exact question
+            if "Would you like to add, remove or list your beneficiaries?" not in response:
+                raise ModelRetry(
+                    "Response must end with EXACTLY: 'Would you like to add, remove or list your beneficiaries?' "
+                    "Copy this text precisely. This question MUST be included after every beneficiary list."
+                )
+
+        return response
+    except ModelRetry:
+        raise  # Re-raise ModelRetry so the model tries again
+    except Exception as e:
+        logger.error(f"Error in respond_about_beneficiaries: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
+
+async def route_from_beneficiary_to_supervisor(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+    """
+    Route back to supervisor when the request is not beneficiary-related.
+    Use this immediately if the user asks about investments or other topics.
+
+    Args:
+        client_id: The client's ID
+    """
+    try:
+        if not client_id or client_id.strip() == "":
+            raise ValueError("client_id is required for routing")
+
+        debug_print(f"[{ctx.deps.current_agent_name}] Routing back to {SUPERVISOR_AGENT_NAME}")
+
+        ctx.deps.client_id = client_id
+        ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
+        ctx.deps.trigger_message = "The user has a new request. Route it to the appropriate agent."
+
+        return ""  # Empty response - routing happens in main loop
+    except Exception as e:
+        logger.error(f"Error in route_from_beneficiary_to_supervisor: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
+
+# Investment Agent Output Functions
+async def respond_about_investments(ctx: RunContext[AgentDependencies], response: str) -> str:
+    """
+    Respond to the user about investment matters.
+    Only use this for investment-related responses.
+    Keep responses concise and professional.
+
+    Args:
+        response: Your response about investments
+    """
+    try:
+        debug_print(f"[{ctx.deps.current_agent_name}] Responding about investments")
+
+        # Check if this is a confirmation request (should not validate format)
+        is_confirmation_request = (
+            'are you sure' in response.lower() and
+            'confirm' in response.lower()
+        )
+
+        # Check if this looks like an investment list response
+        # (contains "investment" or "account" and mentions money/balance)
+        is_list_response = (
+            ('investment' in response.lower() or 'account' in response.lower()) and
+            ('$' in response or 'balance' in response.lower()) and
+            not is_confirmation_request  # Don't validate confirmation requests
+        )
+
+        if is_list_response:
+            # Validate format - MUST use numbered list
+            if not any(line.strip().startswith(('1.', '2.', '3.', '4.')) for line in response.split('\n')):
+                raise ModelRetry(
+                    "CRITICAL FORMAT ERROR: You are listing investments but NOT using numbered format. "
+                    "You MUST use this EXACT format:\n\n"
+                    "Here are your investment accounts:\n\n"
+                    "1. [Account Name] - Balance: $[amount]\n"
+                    "2. [Account Name] - Balance: $[amount]\n\n"
+                    "Would you like to open, close or list your investment accounts?\n\n"
+                    "DO NOT use comma-separated format or prose descriptions"
+                )
+
+            # Check for forbidden words
+            forbidden_words = ['update', 'edit', 'modify', 'change', 'manage', 'details', 'make changes', 'further', 'let me know', 'if you need', 'wish to']
+            response_lower = response.lower()
+
+            for word in forbidden_words:
+                if word in response_lower:
+                    raise ModelRetry(
+                        f"Response contains forbidden word/phrase '{word}'. You MUST use EXACTLY this ending: "
+                        "'Would you like to open, close or list your investment accounts?' "
+                        "Do NOT use: update, edit, modify, change, manage, details, make changes, or phrases like 'let me know' or 'wish to'."
+                    )
+
+            # Check for required exact question
+            if "Would you like to open, close or list your investment accounts?" not in response:
+                raise ModelRetry(
+                    "Response must end with EXACTLY: 'Would you like to open, close or list your investment accounts?' "
+                    "Copy this text precisely. This question MUST be included after every investment list."
+                )
+
+        return response
+    except ModelRetry:
+        raise  # Re-raise ModelRetry so the model tries again
+    except Exception as e:
+        logger.error(f"Error in respond_about_investments: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
+
+async def route_from_investment_to_supervisor(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+    """
+    Route back to supervisor when the request is not investment-related.
+    Use this immediately if the user asks about beneficiaries or other topics.
+
+    Args:
+        client_id: The client's ID
+    """
+    try:
+        if not client_id or client_id.strip() == "":
+            raise ValueError("client_id is required for routing")
+
+        debug_print(f"[{ctx.deps.current_agent_name}] Routing back to {SUPERVISOR_AGENT_NAME}")
+
+        ctx.deps.client_id = client_id
+        ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
+        ctx.deps.trigger_message = "The user has a new request. Route it to the appropriate agent."
+
+        return ""  # Empty response - routing happens in main loop
+    except Exception as e:
+        logger.error(f"Error in route_from_investment_to_supervisor: {e}")
+        return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
 
 ### Agents
 AGENT_MODEL = 'openai:gpt-4.1'
@@ -58,7 +281,11 @@ supervisor_agent = Agent(
     AGENT_MODEL,
     name=SUPERVISOR_AGENT_NAME,
     deps_type=AgentDependencies,
-    output_type=WealthManagmentAgentOutput,
+    output_type=[
+        respond_to_user,
+        route_to_beneficiary_agent,
+        route_to_investment_agent
+    ],
     system_prompt=SUPERVISOR_INSTRUCTIONS,
 )
 
@@ -66,7 +293,10 @@ beneficiary_agent = Agent(
     AGENT_MODEL,
     name=BENE_AGENT_NAME,
     deps_type=AgentDependencies,
-    output_type=WealthManagmentAgentOutput,
+    output_type=[
+        respond_about_beneficiaries,
+        route_from_beneficiary_to_supervisor
+    ],
     system_prompt=BENE_INSTRUCTIONS,
 )
 
@@ -74,76 +304,54 @@ investment_agent = Agent(
     AGENT_MODEL,
     name=INVEST_AGENT_NAME,
     deps_type=AgentDependencies,
-    output_type=WealthManagmentAgentOutput,
+    output_type=[
+        respond_about_investments,
+        route_from_investment_to_supervisor
+    ],
     system_prompt=INVEST_INSTRUCTIONS,
 )
-
-### Response Validation
-
-def validate_beneficiary_response(response: str) -> str:
-    """
-    Cleans beneficiary agent responses and adds the exact follow-up question programmatically.
-    Removes any LLM-generated follow-up text and replaces it with the exact required question.
-    """
-    if not response:
-        return response
-
-    # Check if this is a beneficiary list response (contains numbered items or bullet points)
-    lines = response.split('\n')
-    has_list = any(line.strip() and (line.strip()[0].isdigit() or line.strip().startswith('-')) for line in lines)
-
-    if has_list:
-        # This is a beneficiary list - extract only the list portion
-        list_lines = []
-        for line in lines:
-            # Stop at any line that looks like a question or instruction
-            lower_line = line.lower()
-            if any(phrase in lower_line for phrase in ['would you', 'if you', 'let me know', 'please', 'feel free', 'need to', 'want to']):
-                break
-            list_lines.append(line)
-
-        # Reconstruct with exact question appended by application
-        list_portion = '\n'.join(list_lines).strip()
-        exact_question = "Would you like to add a beneficiary, remove a beneficiary, or list your beneficiaries again?"
-
-        return f"{list_portion}\n\n{exact_question}"
-
-    return response
-
-def validate_investment_response(response: str) -> str:
-    """
-    Cleans investment agent responses and adds the exact follow-up question programmatically.
-    Removes any LLM-generated follow-up text and replaces it with the exact required question.
-    """
-    if not response:
-        return response
-
-    # Check if this is an investment list response (contains numbered items or bullet points)
-    lines = response.split('\n')
-    has_list = any(line.strip() and (line.strip()[0].isdigit() or line.strip().startswith('-')) for line in lines)
-
-    if has_list:
-        # This is an investment list - extract only the list portion
-        list_lines = []
-        for line in lines:
-            # Stop at any line that looks like a question or instruction
-            lower_line = line.lower()
-            if any(phrase in lower_line for phrase in ['would you', 'if you', 'let me know', 'please', 'feel free', 'need to', 'want to', 'need details', 'make changes']):
-                break
-            list_lines.append(line)
-
-        # Reconstruct with exact question appended by application
-        list_portion = '\n'.join(list_lines).strip()
-        exact_question = "Would you like to open an investment account, close an investment account, or list your investments again?"
-
-        return f"{list_portion}\n\n{exact_question}"
-
-    return response
 
 ### Managers
 
 beneficiaries_mgr = BeneficiariesManager()
 investment_mgr = InvestmentManager()
+
+### Confirmation Validation Helper
+
+def check_for_confirmation_in_history(context: RunContext[AgentDependencies], action_type: str) -> bool:
+    """
+    Check if the user has provided confirmation in recent message history.
+
+    Args:
+        context: The run context with message history
+        action_type: Type of action ('delete' or 'close')
+
+    Returns:
+        True if confirmation found, False otherwise
+    """
+    # Look at the last few messages for confirmation keywords
+    confirmation_keywords = ['yes', 'confirm', 'sure', 'ok', 'proceed', 'go ahead', 'correct', 'affirmative']
+
+    # Get recent messages (last 3 user messages)
+    recent_messages = []
+    for msg in reversed(context.messages):
+        if hasattr(msg, 'parts'):
+            for part in msg.parts:
+                if hasattr(part, 'content') and isinstance(part.content, str):
+                    # Check if this is a user message (not system/model)
+                    if part.part_kind == 'user-prompt':
+                        recent_messages.append(part.content.lower())
+                        if len(recent_messages) >= 3:
+                            break
+        if len(recent_messages) >= 3:
+            break
+
+    # Check if any recent message contains confirmation
+    for msg in recent_messages:
+        if any(keyword in msg for keyword in confirmation_keywords):
+            return True
+
+    return False
 
 ### Tools
 
@@ -179,29 +387,6 @@ async def set_client_id(context: RunContext[AgentDependencies], client_id: str) 
     debug_print(f"****>>> Deps.client id is now set to {context.deps.client_id}")
     return f"Client ID set to: {client_id}"
 
-@supervisor_agent.tool
-async def handoff_to_beneficiary_agent(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
-    """
-    Hand off to the beneficiary agent to handle beneficiary-related requests.
-    Requires that the client_id is passed in as a parameter
-    """
-
-    if not client_id or client_id.strip() == "":
-        raise ValueError("client_id is required before handoff!")
-
-    return HandoffInformation(next_agent=BENE_AGENT_NAME, client_id=client_id)
-
-@supervisor_agent.tool
-async def handoff_to_investment_agent(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
-    """
-    Hand off to the investment agent to handle investment-related requests.
-    Requires that the client_id is passed in as a parameter
-    """
-    
-    if not client_id or client_id.strip() == "":
-        raise ValueError("client_id is required before handoff!")
-
-    return HandoffInformation(next_agent=INVEST_AGENT_NAME, client_id=client_id)
 
 @beneficiary_agent.tool
 async def add_beneficiaries(
@@ -223,19 +408,30 @@ async def list_beneficiaries(
 @beneficiary_agent.tool
 async def delete_beneficiaries(
         context: RunContext[AgentDependencies], beneficiary_id: str):
+        """
+        Delete a beneficiary. REQUIRES user confirmation before calling this.
+
+        Args:
+            beneficiary_id: The ID of the beneficiary to delete
+
+        Returns:
+            Success message or error if confirmation not found
+        """
+        # Check for confirmation in recent history
+        if not check_for_confirmation_in_history(context, 'delete'):
+            raise ModelRetry(
+                "CRITICAL ERROR: You attempted to delete a beneficiary WITHOUT asking for user confirmation first. "
+                "You MUST:\n"
+                "1. Ask: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                "2. Wait for user response\n"
+                "3. ONLY THEN call delete_beneficiaries\n\n"
+                "Do NOT call this tool again until the user has confirmed."
+            )
+
         logger.info(f"Tool: Deleting beneficiary {beneficiary_id} from account {context.deps.client_id}")
         beneficiaries_mgr.delete_beneficiary(context.deps.client_id, beneficiary_id)
+        return "Beneficiary deleted successfully"
 
-@beneficiary_agent.tool
-async def handoff_to_supervisor(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
-    """
-    Hand off back to the supervisor agent when the request is not beneficiary-related.
-    Use this when the user asks about investments, general questions, or other non-beneficiary topics.
-    """
-    if not client_id or client_id.strip() == "":
-        raise ValueError("client_id is required before handoff!")
-
-    return HandoffInformation(next_agent=SUPERVISOR_AGENT_NAME, client_id=client_id)
 
 @investment_agent.tool
 async def list_investments(context: RunContext[AgentDependencies]) -> list:
@@ -262,162 +458,111 @@ async def open_investment(context: RunContext[AgentDependencies],
 async def close_investment(context: RunContext[AgentDependencies],
     investment_id: str):
     """
-    Deletes a given investment account
+    Close an investment account. REQUIRES user confirmation before calling this.
+
+    Args:
+        investment_id: The ID of the investment account to close
+
+    Returns:
+        Success message or error if confirmation not found
     """
+    # Check for confirmation in recent history
+    if not check_for_confirmation_in_history(context, 'close'):
+        raise ModelRetry(
+            "CRITICAL ERROR: You attempted to close an investment account WITHOUT asking for user confirmation first. "
+            "You MUST:\n"
+            "1. Ask: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
+            "2. Wait for user response\n"
+            "3. ONLY THEN call close_investment\n\n"
+            "Do NOT call this tool again until the user has confirmed."
+        )
+
     return investment_mgr.delete_investment_account(
         client_id=context.deps.client_id,
         investment_id=investment_id)
 
-@investment_agent.tool
-async def handoff_to_supervisor(context: RunContext[AgentDependencies], client_id: str) -> HandoffInformation:
-    """
-    Hand off back to the supervisor agent when the request is not investment-related.
-    Use this when the user asks about beneficiaries, general questions, or other non-investment topics.
-    """
-    if not client_id or client_id.strip() == "":
-        raise ValueError("client_id is required before handoff!")
-
-    return HandoffInformation(next_agent="Supervisor Agent", client_id=client_id)
 
 
 class PydanticAIWealthManagement:
     def __init__(self):
         self.agent_deps = AgentDependencies()
-        self.message_history : List[ModelMessage] = []
-        self.current_agent = supervisor_agent
-        self.current_agent_name = SUPERVISOR_AGENT_NAME
-        self.pending_input: str | None = None # What to feed into the agent this iteration
+        self.message_history: List[ModelMessage] = []
 
     async def run_agent_loop(self):
-        while True:
-            # Get user input with current agent displayed on same line
-            if self.pending_input is None:
-                user_input = input(f"\n[{self.current_agent_name}] Enter your message: ")
-            else:
-                user_input = pending_input
-                self.pending_input = None
+        print("Welcome to ABC Wealth Management. How can I help you?")
 
-            lower_input = user_input.lower() if user_input is not None else ""
-            if lower_input in {"exit","end","quit"}:
+        while True:
+            user_input = input(f"\n[{self.agent_deps.current_agent_name}] Enter your message: ")
+
+            if user_input.lower() in {"exit", "end", "quit"}:
                 break
 
             await self._process_user_message(user_input)
 
-    async def _process_user_message(self, user_input: str):
-        debug_print(f"Processing user message of {user_input}")
-        # Add user input to history before running agent
+        print("Agent loop complete.")
 
-        user_message = ModelRequest(parts=[UserPromptPart(content=user_input, timestamp=datetime.datetime.now(datetime.timezone.utc))])
+    async def _process_user_message(self, user_input: str):
+        """Process a user message through the agent system with routing."""
+        debug_print(f"Processing user message: {user_input}")
+
+        # Add user message to history
+        user_message = ModelRequest(
+            parts=[UserPromptPart(
+                content=user_input,
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )]
+        )
         self.message_history.append(user_message)
 
-        should_force_handoff, handoff, result = await self._check_for_forced_handoff(user_input)
+        # Start with supervisor agent
+        current_agent = self._get_current_agent()
+        current_input = user_input
 
-        await self._handle_handoffs(should_force_handoff, handoff, result)
+        # Loop to handle chain routing
+        while True:
+            # Run the current agent
+            result = await current_agent.run(
+                current_input,
+                deps=self.agent_deps,
+                message_history=self.message_history
+            )
 
-    async def _check_for_forced_handoff(self, user_input: str):
-        should_force_handoff = False
-        result = None
-        if self.current_agent_name == INVEST_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['beneficiary', 'beneficiaries']):
-            debug_print(f"\n>>> Forced handoff detected: Investment agent cannot handle beneficiary requests")
-            should_force_handoff = True
-            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=self.agent_deps.client_id)
-        elif self.current_agent_name == BENE_AGENT_NAME and any(keyword in user_input.lower() for keyword in ['investment', 'account']):
-            debug_print(f"\n>>> Forced handoff detected: Beneficiary agent cannot handle investment requests")
-            should_force_handoff = True
-            handoff = HandoffInformation(next_agent="Supervisor Agent", client_id=self.agent_deps.client_id)
+            # Add agent's new messages to history
+            self.message_history.extend(result.new_messages())
+
+            # Check if output function signaled a route
+            if self.agent_deps.next_agent:
+                # Routing detected - switch to next agent
+                debug_print(f"\n>>> Routing: {self.agent_deps.current_agent_name} → {self.agent_deps.next_agent}")
+
+                self.agent_deps.current_agent_name = self.agent_deps.next_agent
+                current_agent = self._get_current_agent()
+                current_input = self.agent_deps.trigger_message
+
+                # Clear routing state
+                self.agent_deps.next_agent = None
+                self.agent_deps.trigger_message = None
+
+                # Continue loop to process next agent
+                continue
+            else:
+                # No routing - print final response and exit loop
+                if result.output and result.output.strip():
+                    print(result.output)
+                break
+
+    def _get_current_agent(self) -> Agent:
+        """Get the agent instance based on current_agent_name."""
+        if self.agent_deps.current_agent_name == BENE_AGENT_NAME:
+            return beneficiary_agent
+        elif self.agent_deps.current_agent_name == INVEST_AGENT_NAME:
+            return investment_agent
         else:
-            result = await self.current_agent.run(user_input, deps=self.agent_deps,
-                message_history=self.message_history)
-            # Append new messages to history instead of replacing
-            new_messages = result.new_messages()
-            self.message_history.extend(new_messages)
-            handoff = getattr(result.output, "handoff", None)
-
-        debug_print(f"returning {should_force_handoff}, {handoff}, {result}")
-
-        return should_force_handoff, handoff, result
-
-    def _set_handoff_agent(self, handoff: HandoffInformation) -> str:
-        trigger_message = ""
-        debug_print("We have a handoff and a next agent set...")
-
-        if handoff.next_agent == BENE_AGENT_NAME:
-            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
-            self.current_agent = beneficiary_agent
-            self.current_agent_name = BENE_AGENT_NAME
-            trigger_message = "Process the user's beneficiary request from the conversation history. CRITICAL: You do NOT have access to investment data. If the user asks about investments, you MUST call handoff_to_supervisor() with NO response text."
-
-        elif handoff.next_agent == INVEST_AGENT_NAME:
-            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
-            self.current_agent = investment_agent
-            self.current_agent_name = INVEST_AGENT_NAME
-            trigger_message = "Process the user's investment request from the conversation history. CRITICAL: You do NOT have access to beneficiary data. If the user asks about beneficiaries, you MUST call handoff_to_supervisor() with NO response text."
-
-        elif handoff.next_agent == "Supervisor Agent":
-            # Handoff back to supervisor - keep client_id in deps
-            self.agent_deps = AgentDependencies(client_id=handoff.client_id)
-            self.current_agent = supervisor_agent
-            self.current_agent_name = SUPERVISOR_AGENT_NAME
-            # Look at the most recent user message to understand what they want
-            trigger_message = "The user has a new request. Check the most recent user message in the conversation history and route it to the appropriate agent."
-
-        else:
-            raise ValueError(f"unknown next agent type {handoff.next_agent}")
-
-        return trigger_message
-
-
-    async def _handle_handoffs(self, should_force_handoff: bool, handoff: HandoffInformation, result: AgentRunResult):
-        if handoff and handoff.next_agent:
-            if not should_force_handoff:
-                debug_print(f"\n>>> Handoff detected: Switching from {self.current_agent_name} to {handoff.next_agent}")
-
-            trigger_message = self._set_handoff_agent(handoff)
-
-            # Loop to handle chain handoffs
-            while True:
-                result = await self.current_agent.run(trigger_message, deps=self.agent_deps, message_history=self.message_history)
-
-                # Append new messages from agent
-                new_messages = result.new_messages()
-                self.message_history.extend(new_messages)
-
-                # Check if there's another handoff (chain routing)
-                handoff = getattr(result.output, "handoff", None)
-                if handoff and handoff.next_agent:
-                    # There's a chain handoff! Continue routing without printing
-                    debug_print(f"\n>>> Chain handoff detected: Continuing to {handoff.next_agent}")
-                    trigger_message = self._set_handoff_agent(handoff)
-                    # Continue the loop to process the next agent
-                else:
-                    # No more handoffs, print the final response and break
-                    if result.output.response:
-                        # Validate and correct response based on agent type
-                        validated_response = result.output.response
-                        if self.current_agent_name == BENE_AGENT_NAME:
-                            validated_response = validate_beneficiary_response(validated_response)
-                        elif self.current_agent_name == INVEST_AGENT_NAME:
-                            validated_response = validate_investment_response(validated_response)
-                        print(validated_response)
-                    # current_agent, current_agent_name, and agent_deps are already set correctly
-                    # These will be used for the next user input in the outer loop
-                    break
-        else:
-            # Print response if not handing off
-            if not should_force_handoff and result.output.response:
-                # Validate and correct response based on agent type
-                validated_response = result.output.response
-                if self.current_agent_name == BENE_AGENT_NAME:
-                    validated_response = validate_beneficiary_response(validated_response)
-                elif self.current_agent_name == INVEST_AGENT_NAME:
-                    validated_response = validate_investment_response(validated_response)
-                print(validated_response)
+            return supervisor_agent
 
 async def main():
-    print("Welcome to ABC Wealth Management. How can I help you?")
     wealth_management_flow = PydanticAIWealthManagement()
     await wealth_management_flow.run_agent_loop()
-    print("Agent loop complete.")
         
 if __name__ == "__main__":
      asyncio.run(main())

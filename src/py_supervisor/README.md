@@ -30,7 +30,8 @@ export OPENAI_API_KEY=sk-proj-....
 
 ## Running the agent
 ```bash
-source setoaikey.sh
+cd src/py_supervisor
+source ../../setoaikey.sh
 uv run python -m py_supervisor.main
 ```
 
