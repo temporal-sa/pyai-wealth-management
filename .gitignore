@@ -15,6 +15,7 @@ wheels/
 # project specific
 .python-version
 setoaikey.sh
+setclaimcheck.sh
 
 # DS_Store files
 .DS_Store

@@ -1,4 +1,5 @@
 #!/bin/bash
+source ../../setclaimcheck.sh
 source ../../setoaikey.sh
 source ../../setcloudenv.sh
 # set the python path up to the src folder to avoid Error while finding module specification

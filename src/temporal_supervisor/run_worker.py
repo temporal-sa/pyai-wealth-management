@@ -15,6 +15,8 @@ from common.client_helper import ClientHelper
 from temporal_supervisor.activities.event_stream_activities import EventStreamActivities
 from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 
+from temporal_supervisor.claim_check.claim_check_plugin import ClaimCheckPlugin
+
 from temporalio.envconfig import ClientConfig
 
 async def main():
@@ -22,7 +24,7 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(filename)s:%(lineno)s | %(message)s")
     
     client_helper = ClientHelper()
-    plugins = [ PydanticAIPlugin() ]
+    plugins = [ PydanticAIPlugin(), ClaimCheckPlugin() ]
     print(f"address is {client_helper.address} and plugins are {plugins}")
     client = await Client.connect(**client_helper.client_config,
                                   plugins=plugins)

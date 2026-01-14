@@ -13,7 +13,7 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from common.event_stream_manager import EventStreamManager
 from common.client_helper import ClientHelper
 from common.user_message import ProcessUserMessageInput
-# from temporal_supervisor.claim_check.claim_check_plugin import ClaimCheckPlugin
+from temporal_supervisor.claim_check.claim_check_plugin import ClaimCheckPlugin
 from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 
 temporal_client: Optional[Client] = None
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         **client_helper.client_config,
         plugins=[
             PydanticAIPlugin(),
+            ClaimCheckPlugin(),
         ]
     )
     yield
