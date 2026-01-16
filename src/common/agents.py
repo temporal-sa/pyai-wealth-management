@@ -29,6 +29,11 @@ class AgentDependencies:
     next_agent: Optional[str] = None  # Signals routing to another agent
     trigger_message: Optional[str] = None  # Message for next agent
     current_agent_name: str = SUPERVISOR_AGENT_NAME  # For debugging/logging
+    message_history: list = None  # Message history for confirmation checking
+
+    def __post_init__(self):
+        if self.message_history is None:
+            self.message_history = []
 
 ### Output Functions
 
@@ -284,25 +289,41 @@ def check_for_confirmation_in_history(context: RunContext[AgentDependencies], ac
     # Look at the last few messages for confirmation keywords
     confirmation_keywords = ['yes', 'confirm', 'sure', 'ok', 'proceed', 'go ahead', 'correct', 'affirmative']
 
+    # Get message history from deps (works in both Temporal and non-Temporal contexts)
+    message_history = context.deps.message_history
+
+    logger.info(f"Checking confirmation in history. Total messages: {len(message_history)}")
+
     # Get recent messages (last 3 user messages)
     recent_messages = []
-    for msg in reversed(context.messages):
+    for idx, msg in enumerate(reversed(message_history)):
+        logger.info(f"Message {idx}: type={type(msg).__name__}, has_parts={hasattr(msg, 'parts')}")
         if hasattr(msg, 'parts'):
-            for part in msg.parts:
+            logger.info(f"  Parts count: {len(msg.parts)}")
+            for part_idx, part in enumerate(msg.parts):
+                logger.info(f"  Part {part_idx}: type={type(part).__name__}, has_content={hasattr(part, 'content')}, has_part_kind={hasattr(part, 'part_kind')}")
+                if hasattr(part, 'part_kind'):
+                    logger.info(f"    part_kind='{part.part_kind}'")
                 if hasattr(part, 'content') and isinstance(part.content, str):
+                    logger.info(f"    content='{part.content[:50]}'")
                     # Check if this is a user message (not system/model)
                     if part.part_kind == 'user-prompt':
                         recent_messages.append(part.content.lower())
+                        logger.info(f"Found user message: '{part.content}'")
                         if len(recent_messages) >= 3:
                             break
         if len(recent_messages) >= 3:
             break
 
+    logger.info(f"Recent user messages: {recent_messages}")
+
     # Check if any recent message contains confirmation
     for msg in recent_messages:
         if any(keyword in msg for keyword in confirmation_keywords):
+            logger.info(f"Found confirmation keyword in message: '{msg}'")
             return True
 
+    logger.info("No confirmation found in recent messages")
     return False
 
 ### Managers
@@ -402,30 +423,84 @@ async def list_beneficiaries(
 
 @beneficiary_agent.tool
 async def delete_beneficiaries(
-        context: RunContext[AgentDependencies], beneficiary_id: str):
+        context: RunContext[AgentDependencies],
+        first_name: str,
+        last_name: str,
+        user_confirmed: bool = False):
         """
-        Delete a beneficiary. REQUIRES user confirmation before calling this.
+        Delete a beneficiary by their name. REQUIRES user confirmation before calling this.
+
+        CRITICAL: You MUST call this tool after the user confirms deletion.
+        Do NOT just say "I will proceed to remove" - actually call this tool!
+
+        IMPORTANT: When calling this tool after user confirmation, you MUST set user_confirmed=True.
+        Example: delete_beneficiaries(first_name="Junior", last_name="Doe", user_confirmed=True)
 
         Args:
-            beneficiary_id: The ID of the beneficiary to delete
+            first_name: The first name of the beneficiary to delete (e.g., "Junior")
+            last_name: The last name of the beneficiary to delete (e.g., "Doe")
+            user_confirmed: Set to True when the user has explicitly confirmed the deletion (default: False)
 
         Returns:
-            Success message or error if confirmation not found
+            Success message or error if confirmation not provided or beneficiary not found
         """
-        # Check for confirmation in recent history
-        if not check_for_confirmation_in_history(context, 'delete'):
+        # Check for confirmation parameter
+        if not user_confirmed:
             raise ModelRetry(
-                "CRITICAL ERROR: You attempted to delete a beneficiary WITHOUT asking for user confirmation first. "
+                "CRITICAL ERROR: You attempted to delete a beneficiary WITHOUT user confirmation. "
                 "You MUST:\n"
                 "1. Ask: 'Are you sure you want to remove [Name]? Please confirm.'\n"
                 "2. Wait for user response\n"
-                "3. ONLY THEN call delete_beneficiaries\n\n"
+                "3. When user confirms (says 'yes', 'confirm', etc.), call this tool with user_confirmed=True\n\n"
+                "Example: delete_beneficiaries(first_name=\"Junior\", last_name=\"Doe\", user_confirmed=True)\n\n"
                 "Do NOT call this tool again until the user has confirmed."
             )
 
-        logger.info(f"Tool: Deleting beneficiary {beneficiary_id} from account {context.deps.client_id}")
+        # Double-check: Validate that the most recent user message is actually a confirmation
+        # and not the initial "remove X" request
+        message_history = context.deps.message_history
+        if message_history:
+            # Get the most recent message
+            for msg in reversed(message_history):
+                if hasattr(msg, 'parts'):
+                    for part in msg.parts:
+                        if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
+                            if hasattr(part, 'content') and isinstance(part.content, str):
+                                last_user_msg = part.content.lower()
+
+                                # Check if this looks like a "remove X" command rather than a confirmation
+                                if 'remove' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
+                                    raise ModelRetry(
+                                        "CRITICAL ERROR: The user's last message was a remove REQUEST, not a confirmation. "
+                                        f"Last message: '{part.content}'\n\n"
+                                        "This is Step 1, not Step 2! You MUST:\n"
+                                        "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                                        "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+                                        "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+                                        "Do NOT call this tool until the user explicitly confirms!"
+                                    )
+                                break
+                        break
+                    break
+
+        # Look up the beneficiary by name to get the ID
+        beneficiaries = beneficiaries_mgr.list_beneficiaries(context.deps.client_id)
+        full_name = f"{first_name} {last_name}".lower()
+
+        matching_beneficiary = None
+        for bene in beneficiaries:
+            bene_full_name = f"{bene['first_name']} {bene['last_name']}".lower()
+            if bene_full_name == full_name:
+                matching_beneficiary = bene
+                break
+
+        if not matching_beneficiary:
+            return f"ERROR: Could not find beneficiary named '{first_name} {last_name}'"
+
+        beneficiary_id = matching_beneficiary['beneficiary_id']
+        logger.info(f"Tool: Deleting beneficiary {first_name} {last_name} (ID: {beneficiary_id}) from account {context.deps.client_id}")
         beneficiaries_mgr.delete_beneficiary(context.deps.client_id, beneficiary_id)
-        return "Beneficiary deleted successfully"
+        return f"Successfully deleted {first_name} {last_name}"
 
 
 @investment_agent.tool
@@ -451,26 +526,62 @@ async def open_investment(context: RunContext[AgentDependencies],
 
 @investment_agent.tool
 async def close_investment(context: RunContext[AgentDependencies],
-    investment_id: str):
+    investment_id: str,
+    user_confirmed: bool = False):
     """
     Close an investment account. REQUIRES user confirmation before calling this.
 
+    CRITICAL: You MUST call this tool after the user confirms closing the account.
+    Do NOT just say "I will proceed to close" - actually call this tool!
+
+    IMPORTANT: When calling this tool after user confirmation, you MUST set user_confirmed=True.
+    Example: close_investment(investment_id="12345", user_confirmed=True)
+
     Args:
         investment_id: The ID of the investment account to close
+        user_confirmed: Set to True when the user has explicitly confirmed closing the account (default: False)
 
     Returns:
-        Success message or error if confirmation not found
+        Success message or error if confirmation not provided or account not found
     """
-    # Check for confirmation in recent history
-    if not check_for_confirmation_in_history(context, 'close'):
+    # Check for confirmation parameter
+    if not user_confirmed:
         raise ModelRetry(
-            "CRITICAL ERROR: You attempted to close an investment account WITHOUT asking for user confirmation first. "
+            "CRITICAL ERROR: You attempted to close an investment account WITHOUT user confirmation. "
             "You MUST:\n"
             "1. Ask: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
             "2. Wait for user response\n"
-            "3. ONLY THEN call close_investment\n\n"
+            "3. When user confirms (says 'yes', 'confirm', etc.), call this tool with user_confirmed=True\n\n"
+            "Example: close_investment(investment_id=\"12345\", user_confirmed=True)\n\n"
             "Do NOT call this tool again until the user has confirmed."
         )
+
+    # Double-check: Validate that the most recent user message is actually a confirmation
+    # and not the initial "close X" request
+    message_history = context.deps.message_history
+    if message_history:
+        # Get the most recent message
+        for msg in reversed(message_history):
+            if hasattr(msg, 'parts'):
+                for part in msg.parts:
+                    if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
+                        if hasattr(part, 'content') and isinstance(part.content, str):
+                            last_user_msg = part.content.lower()
+
+                            # Check if this looks like a "close X" command rather than a confirmation
+                            if 'close' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
+                                raise ModelRetry(
+                                    "CRITICAL ERROR: The user's last message was a close REQUEST, not a confirmation. "
+                                    f"Last message: '{part.content}'\n\n"
+                                    "This is Step 1, not Step 2! You MUST:\n"
+                                    "1. First ASK: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
+                                    "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+                                    "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+                                    "Do NOT call this tool until the user explicitly confirms!"
+                                )
+                            break
+                    break
+                break
 
     return investment_mgr.delete_investment_account(
         client_id=context.deps.client_id,

@@ -69,6 +69,9 @@ class PydanticAIWealthManagement:
 
         # Loop to handle chain routing
         while True:
+            # Sync message history to deps before running agent (for confirmation checking)
+            self.agent_deps.message_history = self.message_history
+
             # Run the current agent
             result = await current_agent.run(
                 current_input,
