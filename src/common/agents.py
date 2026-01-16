@@ -292,38 +292,38 @@ def check_for_confirmation_in_history(context: RunContext[AgentDependencies], ac
     # Get message history from deps (works in both Temporal and non-Temporal contexts)
     message_history = context.deps.message_history
 
-    logger.info(f"Checking confirmation in history. Total messages: {len(message_history)}")
+    debug_print(f"Checking confirmation in history. Total messages: {len(message_history)}")
 
     # Get recent messages (last 3 user messages)
     recent_messages = []
     for idx, msg in enumerate(reversed(message_history)):
-        logger.info(f"Message {idx}: type={type(msg).__name__}, has_parts={hasattr(msg, 'parts')}")
+        debug_print(f"Message {idx}: type={type(msg).__name__}, has_parts={hasattr(msg, 'parts')}")
         if hasattr(msg, 'parts'):
-            logger.info(f"  Parts count: {len(msg.parts)}")
+            debug_print(f"  Parts count: {len(msg.parts)}")
             for part_idx, part in enumerate(msg.parts):
-                logger.info(f"  Part {part_idx}: type={type(part).__name__}, has_content={hasattr(part, 'content')}, has_part_kind={hasattr(part, 'part_kind')}")
+                debug_print(f"  Part {part_idx}: type={type(part).__name__}, has_content={hasattr(part, 'content')}, has_part_kind={hasattr(part, 'part_kind')}")
                 if hasattr(part, 'part_kind'):
-                    logger.info(f"    part_kind='{part.part_kind}'")
+                    debug_print(f"    part_kind='{part.part_kind}'")
                 if hasattr(part, 'content') and isinstance(part.content, str):
-                    logger.info(f"    content='{part.content[:50]}'")
+                    debug_print(f"    content='{part.content[:50]}'")
                     # Check if this is a user message (not system/model)
                     if part.part_kind == 'user-prompt':
                         recent_messages.append(part.content.lower())
-                        logger.info(f"Found user message: '{part.content}'")
+                        debug_print(f"Found user message: '{part.content}'")
                         if len(recent_messages) >= 3:
                             break
         if len(recent_messages) >= 3:
             break
 
-    logger.info(f"Recent user messages: {recent_messages}")
+    debug_print(f"Recent user messages: {recent_messages}")
 
     # Check if any recent message contains confirmation
     for msg in recent_messages:
         if any(keyword in msg for keyword in confirmation_keywords):
-            logger.info(f"Found confirmation keyword in message: '{msg}'")
+            debug_print(f"Found confirmation keyword in message: '{msg}'")
             return True
 
-    logger.info("No confirmation found in recent messages")
+    debug_print("No confirmation found in recent messages")
     return False
 
 ### Managers
@@ -498,7 +498,7 @@ async def delete_beneficiaries(
             return f"ERROR: Could not find beneficiary named '{first_name} {last_name}'"
 
         beneficiary_id = matching_beneficiary['beneficiary_id']
-        logger.info(f"Tool: Deleting beneficiary {first_name} {last_name} (ID: {beneficiary_id}) from account {context.deps.client_id}")
+        debug_print(f"Tool: Deleting beneficiary {first_name} {last_name} (ID: {beneficiary_id}) from account {context.deps.client_id}")
         beneficiaries_mgr.delete_beneficiary(context.deps.client_id, beneficiary_id)
         return f"Successfully deleted {first_name} {last_name}"
 

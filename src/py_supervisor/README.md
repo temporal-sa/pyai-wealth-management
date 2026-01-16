@@ -40,16 +40,16 @@ Example Output
 Welcome to ABC Wealth Management. How can I help you?
 
 [Supervisor Agent] Enter your message: Who are my beneficiaries?
-To help you with information about your beneficiaries, could you please provide your client ID or account number? This will allow me to access the relevant details for you.
+To help you with your beneficiaries, could you please provide your client ID?
 
 [Supervisor Agent] Enter your message: 123
-Your current beneficiaries are:
+Here are your current beneficiaries:
 
 1. John Doe (son)
 2. Jane Doe (daughter)
 3. Joan Doe (spouse)
 
-Would you like to add a beneficiary, remove a beneficiary, or list your beneficiaries again?
+Would you like to add, remove or list your beneficiaries?
 
 [Beneficiary Agent] Enter your message: What investments do I have?
 Here are your current investment accounts:
@@ -58,8 +58,8 @@ Here are your current investment accounts:
 2. Savings: $2,312.08
 3. 401K: $11,070.89
 
-Would you like to open an investment account, close an investment account, or list your investments again?
+Would you like to open, close or list your investment accounts?
 
-[Investment Agent] Enter your message: exit
+[Investment Agent] Enter your message: end
 Agent loop complete.
 ```

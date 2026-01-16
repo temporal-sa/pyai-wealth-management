@@ -58,7 +58,6 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
             user_input = None
             if not self.pending_chat_messages.empty():
                 user_input = self.pending_chat_messages.get_nowait()
-                workflow.logger.info(f"Message pulled from queue is {user_input}")
 
             chat_interaction = ChatInteraction(
                 user_prompt=user_input,
@@ -88,7 +87,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
     @workflow.signal
     async def process_user_message(self, message_input: ProcessUserMessageInput):
-        workflow.logger.info(f"processing user message {message_input}")
+        workflow.logger.info(f"Received user message {message_input}")
         await self.pending_chat_messages.put(message_input.user_input)
 
     async def _process_user_message(self, chat_interaction: ChatInteraction, user_input: str):
@@ -123,7 +122,6 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                 deps=self.agent_deps,
                 message_history=self.message_history
             )
-            workflow.logger.info("Done running the current agent.")
 
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
