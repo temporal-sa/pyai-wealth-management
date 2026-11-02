@@ -997,7 +997,7 @@ async def update_kyc_details(ctx: RunContext[AgentDependencies], client_details:
         marital_status=client_details.marital_status if client_details and client_details.marital_status else original.marital_status,
     )
 
-    workflow.logger.info(f"Merged client details - Original: {original}, Updates: {client_details}, Merged: {merged_client}")
+    logger.info(f"Merged client details - Original: {original}, Updates: {client_details}, Merged: {merged_client}")
 
     return await update_client_details(workflow_id, merged_client)
 
