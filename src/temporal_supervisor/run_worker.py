@@ -18,6 +18,9 @@ from temporal_supervisor.activities.local_activities import LocalActivities
 from temporal_supervisor.activities.clients import ClientActivities
 from temporal_supervisor.activities.open_account import OpenAccount
 from temporal_supervisor.activities.investments import Investments
+from temporal_supervisor.activities.funding import Funding
+from temporal_supervisor.activities.custodian import Custodian
+from temporal_supervisor.model_config import LLM_MAX_CALLS_PER_SECOND, LLM_TASK_QUEUE
 from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 from temporal_supervisor.workflows.open_account_workflow import OpenInvestmentAccountWorkflow
 
@@ -56,8 +59,14 @@ async def main():
         workflows=choose_workflows(client_helper),
         activities=[
             Investments.list_investments,
+            Investments.validate_new_account,
+            Investments.find_promotion,
             Investments.open_investment,
+            Investments.remove_investment,
             Investments.close_investment,
+            Funding.debit_linked_account,
+            Funding.credit_linked_account,
+            Custodian.register_account,
             ClientActivities.get_client,
             ClientActivities.add_client,
             ClientActivities.update_client,
@@ -71,8 +80,25 @@ async def main():
         ],
     )
 
-    print(f"Running worker on {client_helper.address}")
-    await worker.run()
+    # Model calls run on their own task queue so they can be rate limited without
+    # slowing down the tools. The limit is enforced by the Temporal service across
+    # all workers polling the queue. PydanticAIPlugin only registers an agent's
+    # activities on workers that run its workflow, so register them here directly.
+    llm_worker = Worker(
+        client,
+        task_queue=LLM_TASK_QUEUE,
+        activities=[
+            agent_activity
+            for agent in WealthManagementWorkflow.__pydantic_ai_agents__
+            for agent_activity in agent.temporal_activities
+        ],
+        max_task_queue_activities_per_second=LLM_MAX_CALLS_PER_SECOND,
+    )
+
+    limit = f"{LLM_MAX_CALLS_PER_SECOND}/s" if LLM_MAX_CALLS_PER_SECOND else "unlimited"
+    print(f"Running worker on {client_helper.address}, task queues {client_helper.taskQueue} "
+          f"and {LLM_TASK_QUEUE} (model calls: {limit})")
+    await asyncio.gather(worker.run(), llm_worker.run())
 
 if __name__ == '__main__':
     asyncio.run(main())

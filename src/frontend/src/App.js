@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { API_BASE_URL } from './config';
+import ChaosPanel from './ChaosPanel';
+
+const SHOW_CHAOS_KEY = 'showChaosPanel';
+
+function loadShowChaos() {
+  try {
+    return localStorage.getItem(SHOW_CHAOS_KEY) === 'true';
+  } catch (e) {
+    return false;
+  }
+}
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -15,6 +26,7 @@ function App() {
   const defaultHeaderText = 'Chat session started.';
   const workflow_id_prefix = 'pyai-temporal-agent-';
   const [workflow_id, setWorkflowId] = useState('');
+  const [showChaos, setShowChaos] = useState(loadShowChaos);
 
   useEffect(() => {
     if (chatWindowRef.current) {
@@ -153,6 +165,16 @@ function App() {
     }
   };
 
+  const handleToggleChaos = () => {
+    const next = !showChaos;
+    setShowChaos(next);
+    try {
+      localStorage.setItem(SHOW_CHAOS_KEY, String(next));
+    } catch (e) {
+      // Not remembered across reloads; the panel still toggles.
+    }
+  };
+
   const fetchChatHistory = async (headerText) => {
     const currentEventCount = eventCountRef.current;
     console.log("fetching chat history, event count is ", currentEventCount);
@@ -214,42 +236,50 @@ function App() {
   };
 
   return (
-    <div className="App">
-      <div className="header">PyAI Wealth Management Chatbot</div>
-      {statusContent && (
-        <div className="status-area">
-          {statusContent}
+    <div className="layout">
+      <div className="App">
+        <div className="header">
+          PyAI Wealth Management Chatbot
+          <button className="chaos-toggle" onClick={handleToggleChaos}>
+            {showChaos ? 'Hide chaos' : 'Chaos'}
+          </button>
         </div>
-      )}
-      <div className="chat-window" ref={chatWindowRef}>
-        {messages.map((msg, index) => (
-          <div key={index} className={`message ${msg.type}`}>
-            {msg.text.split('\n').map((line, i) => (
-                  <span key={i}>
-                    {line}
-                    <br />
-                  </span>
-            ))}
+        {statusContent && (
+          <div className="status-area">
+            {statusContent}
           </div>
-        ))}
+        )}
+        <div className="chat-window" ref={chatWindowRef}>
+          {messages.map((msg, index) => (
+            <div key={index} className={`message ${msg.type}`}>
+              {msg.text.split('\n').map((line, i) => (
+                    <span key={i}>
+                      {line}
+                      <br />
+                    </span>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div className="input-area">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+            placeholder="Type a message..."
+            disabled={!isChatActive}
+          />
+          <button onClick={handleSend} disabled={!isChatActive}>Send</button>
+        </div>
+        <button
+          onClick={handleToggleChatState}
+          className={`end-chat-button ${!isChatActive ? 'start-chat-button' : ''}`}
+        >
+          {isChatActive ? 'End Chat' : 'Start Chat'}
+        </button>
       </div>
-      <div className="input-area">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-          placeholder="Type a message..."
-          disabled={!isChatActive}
-        />
-        <button onClick={handleSend} disabled={!isChatActive}>Send</button>
-      </div>
-      <button
-        onClick={handleToggleChatState}
-        className={`end-chat-button ${!isChatActive ? 'start-chat-button' : ''}`}
-      >
-        {isChatActive ? 'End Chat' : 'Start Chat'}
-      </button>
+      {showChaos && <ChaosPanel />}
     </div>
   );
 }
