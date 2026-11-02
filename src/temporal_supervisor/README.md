@@ -9,7 +9,7 @@ Scenarios currently implmeneted include
 * Add Beneficiary - add a new beneficiary to your account
 * List Beneficiaries - shows a list of beneficiaries and their relationship to the account owner
 * Delete Beneficiary - delete a beneficiary from your account
-* Open Investment Account - opens a new investment account 
+* Open Investment Account - opens a new investment account by starting a child workflow. The agent asks you to confirm or update your details (KYC), then the account waits for a compliance approval signal before it is created. The account opening workflow can run in Python (default) or Java
 * List Investments - shows a list of accounts and their current balances
 * Close Investment Account - closes an investment account
 
@@ -32,6 +32,7 @@ that drive the agentic application.
 * [OpenAI API Key] (https://platform.openai.com/api-keys) - Your key to accessing OpenAI's LLM
 * [Temporal CLI](https://docs.temporal.io/cli#install) - Local Temporal service
 * [Redis](https://redis.io/downloads/) - Stores conversation history
+* [Java](https://adoptium.net/) 17 or 21 (optional) - Only needed to run the Java Open Investment Account Workflow. The Gradle version used by the project does not support newer JDKs
 
 # Set up Python Environment
 ```bash
@@ -178,7 +179,7 @@ cd java
 In another terminal, start the REST API.
 
 ```bash
-cd src/temporal_supervisor/api
+cd src/api
 ./startlocalapi.sh
 ```
 
@@ -186,7 +187,8 @@ And in another terminal, start the UX.
 
 ### Start the UX
 ```bash
-cd src/temporal_supervisor/frontend
+cd src/frontend
+npm install
 npm start
 ```
 
@@ -196,8 +198,10 @@ If you are opening a new investment account, in another terminal
 ### Send the Compliance Reviewed Signal 
 ```bash
 cd src/temporal_supervisor
-./localsendcomplianceapproval.sh <Child Workflow ID>
+./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
+
+The child workflow ID is shown at the end of the agent's reply when it asks you to confirm your information, for example `(Workflow ID: OpenAccount-pyai-temporal-agent-abc123-123-Vacation)`. Quote it if the account name contains a space.
 
 Here is a screenshot of the UX walking through a few scenarios:
 
@@ -304,5 +308,7 @@ If you are opening a new investment account, in another terminal
 ### Send the Compliance Reviewed Signal 
 ```bash
 cd src/temporal_supervisor
-./cloudsendcomplianceapproval.sh <Child Workflow ID>
+./cloudsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
+
+The child workflow ID is shown at the end of the agent's reply when it asks you to confirm your information, for example `(Workflow ID: OpenAccount-pyai-temporal-agent-abc123-123-Vacation)`. Quote it if the account name contains a space.

@@ -6,4 +6,4 @@ fi
 source ../../setclaimcheck.sh
 export SKIP_OPENAI_PLUGIN=True; 
 export PYTHONPATH="${PYTHONPATH}:../../src"; 
-uv run python -m temporal_supervisor.run_send_compliance_approval --workflow-id $1
+uv run python -m temporal_supervisor.run_send_compliance_approval --workflow-id "$1"
