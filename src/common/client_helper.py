@@ -16,3 +16,6 @@ class ClientHelper:
         self.address = self.client_config.get('target_host')
         self.namespace = self.client_config.get('namespace')
         self.taskQueue = os.getenv("TEMPORAL_TASK_QUEUE", "PY-AI-Supervisor")
+        # Task Queue for Opening a new Account. If this is not set, use the same task queue as the Supervisor
+        self.taskQueueOpenAccount = os.getenv("TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT", self.taskQueue)
+

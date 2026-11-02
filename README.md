@@ -16,7 +16,7 @@ Scenarios currently implmeneted include:
 * Add Beneficiary - add a new beneficiary to your account
 * List Beneficiaries - shows a list of beneficiaries and their relationship to the account owner
 * Delete Beneficiary - delete a beneficiary from your account
-* Open Investment Account - opens a new investment account 
+* Open Investment Account - opens a new investment account by starting a child workflow. The agent asks you to confirm or update your details (KYC), then the account waits for a compliance approval signal before it is created. The account opening workflow can run in Python (default) or Java
 * List Investments - shows a list of accounts and their current balances
 * Close Investment Account - closes an investment account
 
@@ -27,6 +27,7 @@ You can run through the scenarios with the Temporal version using a [Web Applica
 * [OpenAI API Key] (https://platform.openai.com/api-keys) - Your key to accessing OpenAI's LLM
 * [Temporal CLI](https://docs.temporal.io/cli#install) - Local Temporal service
 * [Redis](https://redis.io/downloads/) - Stores conversation history
+* [Java](https://adoptium.net/) 17 or 21 (optional) - Only needed for the [Java Open Investment Account Workflow](java/README.md)
 
 ## Set up Python Environment
 ```bash
