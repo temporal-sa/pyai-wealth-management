@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.Map;
 
 @WorkflowImpl
 public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountWorkflow {
@@ -98,8 +99,13 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     }
 
     @Override
-    public String update_client_details() {
-        return "";
+    public String update_client_details(Map<String, Object> clientDetails) {
+        Logger log = Workflow.getLogger(OpenInvestmentAccountWorkflowImpl.class);
+        log.info("Updating client information for {}", this.inputs.getClient_id());
+        String result = activityStub.execute("update_client", String.class,
+                this.inputs.getClient_id(), clientDetails);
+        this.kycVerified = true;
+        return result;
     }
 
     @Override

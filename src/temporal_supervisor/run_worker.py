@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Sequence, Type
 
 from temporalio import worker
 from temporalio.client import Client

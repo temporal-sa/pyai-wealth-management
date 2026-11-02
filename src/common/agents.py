@@ -893,7 +893,8 @@ async def close_investment(context: RunContext[AgentDependencies],
 
 # Open Account Agent Tools
 
-@open_account_agent.tool
+# Called directly from respond_about_account_opening rather than registered as a tool:
+# TemporalAgent runs tools as activities, where workflow.start_child_workflow is unavailable.
 async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], account_input: OpenInvestmentAccountInput) -> str:
     """
     Start a new investment account opening workflow.

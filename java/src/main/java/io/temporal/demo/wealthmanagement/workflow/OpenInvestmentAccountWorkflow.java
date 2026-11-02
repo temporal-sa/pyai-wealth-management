@@ -5,6 +5,8 @@ import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountOutput;
 import io.temporal.workflow.*;
 
+import java.util.Map;
+
 @WorkflowInterface
 public interface OpenInvestmentAccountWorkflow {
     @WorkflowMethod
@@ -17,7 +19,7 @@ public interface OpenInvestmentAccountWorkflow {
     WealthManagementClient get_client_details();
 
     @UpdateMethod
-    String update_client_details(/* tbd */);
+    String update_client_details(Map<String, Object> clientDetails);
 
     @SignalMethod
     void verify_kyc();
