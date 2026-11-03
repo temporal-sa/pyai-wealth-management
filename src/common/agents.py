@@ -19,7 +19,7 @@ from common.investment_manager import InvestmentManager, InvestmentAccount
 from common.domain_classes import OpenInvestmentAccountInput, WealthManagementClient
 
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 from temporalio.workflow import ParentClosePolicy
 from temporalio.client import Client, WorkflowHandle
 
@@ -471,7 +471,12 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
 
         try:
             # 1. Start the child workflow automatically by calling the tool function directly
-            workflow_id = await start_account_opening_workflow(ctx, account_info)
+            try:
+                workflow_id = await start_account_opening_workflow(ctx, account_info)
+            except WorkflowAlreadyStartedError:
+                ctx.deps.pending_account_info = None
+                return (f"Your {account_info.account_name} account is already being opened. "
+                        f"Its status updates will appear here as it progresses.")
             workflow.logger.info(f"Started workflow: {workflow_id}")
 
             # Store workflow_id in deps so agent can access it for subsequent operations
@@ -686,7 +691,7 @@ supervisor_agent = Agent(
         route_to_beneficiary_agent,
         route_to_investment_agent
     ],
-    system_prompt=SUPERVISOR_INSTRUCTIONS,
+    instructions=SUPERVISOR_INSTRUCTIONS,
 )
 
 beneficiary_agent = Agent(
@@ -697,7 +702,7 @@ beneficiary_agent = Agent(
         respond_about_beneficiaries,
         route_from_beneficiary_to_supervisor
     ],
-    system_prompt=BENE_INSTRUCTIONS,
+    instructions=BENE_INSTRUCTIONS,
 )
 
 investment_agent = Agent(
@@ -709,7 +714,7 @@ investment_agent = Agent(
         route_from_investment_to_supervisor,
         route_from_investment_to_open_account,
     ],
-    system_prompt=INVEST_INSTRUCTIONS,
+    instructions=INVEST_INSTRUCTIONS,
 )
 
 open_account_agent = Agent(
@@ -720,7 +725,7 @@ open_account_agent = Agent(
         respond_about_account_opening,
         route_from_open_account_to_supervisor,
     ],
-    system_prompt=OPEN_ACCOUNT_INSTRUCTIONS,
+    instructions=OPEN_ACCOUNT_INSTRUCTIONS,
     end_strategy='exhaustive',
     # Room for the output checks in respond_about_account_opening to send the model back.
     output_retries=3,
@@ -1025,8 +1030,9 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
 
         return child_workflow_id
     except Exception as e:
+        # Raised rather than returned: the caller uses the result as a workflow ID.
         logger.error(f"Error starting account opening workflow: {e}")
-        return f"Error starting workflow: {str(e)}"
+        raise
 
 @open_account_agent.tool
 async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:

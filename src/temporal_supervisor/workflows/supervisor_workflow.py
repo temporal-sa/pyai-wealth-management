@@ -24,7 +24,7 @@ from common.agents import (
     open_account_agent,
 )
 
-from common.agent_constants import BENE_AGENT_NAME, INVEST_AGENT_NAME, OPEN_ACCOUNT_AGENT_NAME
+from common.agent_constants import BENE_AGENT_NAME, INVEST_AGENT_NAME, OPEN_ACCOUNT_AGENT_NAME, SUPERVISOR_AGENT_NAME
 from common.user_message import ProcessUserMessageInput, ChatInteraction
 from common.account_context import UpdateAccountOpeningStateInput
 from common.status_update import StatusUpdate
@@ -35,6 +35,9 @@ from temporal_supervisor.retry_policies import LLM_RETRY_POLICY, TOOL_RETRY_POLI
 
 with workflow.unsafe.imports_passed_through():
     from temporal_supervisor.model_config import LLM_TASK_QUEUE
+
+# States the account opening workflows (Python and Java) end in
+ACCOUNT_OPENING_ENDED = ("Complete", "Rolled back")
 
 def _temporal_agent(agent: Agent, workflow_tools: tuple = ()) -> TemporalAgent:
     # Tool calls and model calls retry for as long as an outage lasts. Model calls
@@ -133,8 +136,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
     @workflow.signal
     async def update_account_opening_state(self, state_input: UpdateAccountOpeningStateInput):
         workflow.logger.info(f"Account Opening State changed {state_input.account_name} {state_input.state}")
-        status_message = f"New {state_input.account_name} accountstatus changed: {state_input.state}"
-        await self.pending_status_updates.put(status_message)
+        await self.pending_status_updates.put(state_input)
 
     async def _process_chat_message(self, message: str):
         chat_interaction = ChatInteraction(
@@ -155,8 +157,12 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                     maximum_interval=timedelta(seconds=30))
         )
 
-    async def _process_status_update(self, status_message: str):
+    async def _process_status_update(self, state_input: UpdateAccountOpeningStateInput):
+        status_message = f"New {state_input.account_name} accountstatus changed: {state_input.state}"
         workflow.logger.info(f"processing status update: {status_message}")
+
+        if state_input.state.startswith(ACCOUNT_OPENING_ENDED):
+            self._end_account_opening(state_input)
 
         # TODO: Consider filtering which messages we want to update the client
         status_update = StatusUpdate(status=status_message)
@@ -166,33 +172,53 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
             schedule_to_close_timeout=self.sched_to_close_timeout, 
             retry_policy=self.retry_policy,
         )
-        
+
+    def _end_account_opening(self, state_input: UpdateAccountOpeningStateInput):
+        # The status updates only reach the UI, so tell the agents how the account
+        # opening ended. Otherwise they still believe a rolled back account was opened.
+        # Not a SystemPromptPart: pydantic-ai places the agent's instructions after the
+        # first N messages, N being the number of system messages, which can split a tool
+        # call from its result.
+        self.message_history.append(ModelRequest(parts=[UserPromptPart(
+            content=f"[Automated status update, not from the customer] The {state_input.account_name} "
+                    f"account opening has ended. Final state: {state_input.state}",
+            timestamp=workflow.now(),
+        )]))
+
+        active = self.agent_deps.active_account_workflow_id
+        if active and active.endswith(f"-{state_input.account_name}"):
+            self.agent_deps.active_account_workflow_id = None
+            self.agent_deps.current_client_info = None
+            self.agent_deps.kyc_pending = False
+            # Nothing is left for the Open Account Agent to do, so the next
+            # message goes to the supervisor to be routed.
+            if self.agent_deps.current_agent_name == OPEN_ACCOUNT_AGENT_NAME:
+                self.agent_deps.current_agent_name = SUPERVISOR_AGENT_NAME
+
     async def _process_user_message(self, chat_interaction: ChatInteraction, user_input: str):
         workflow.logger.info(f"Processing user message of {user_input}")
 
         # Handoffs quote the customer's own words to the next agent
         self.agent_deps.customer_message = user_input
 
-        # Add user input to history before running agent
-        user_message = ModelRequest(
+        # The first agent run adds the user input to the history, so it is only
+        # added to the copy the tools see until then.
+        unrecorded = [ModelRequest(
             parts=[UserPromptPart(
-                content=user_input, 
+                content=user_input,
                 timestamp=workflow.now()
             )]
-        )
-        self.message_history.append(user_message)
+        )]
 
-        # Start with supervisor agent
-        # Start with supervisor agent
         current_agent = self._get_current_agent()
         current_input = user_input
 
         response = ""
         # Loop to handle chain routing
         while True:
-            # Sync message history to deps BEFORE running agent
+            # Sync message history to deps BEFORE running agent, including the user input
             # (so tools can access confirmation messages in context.deps.message_history)
-            self.agent_deps.message_history = self.message_history
+            self.agent_deps.message_history = self.message_history + unrecorded
 
             workflow.logger.info(f"Running the current agent of {current_agent} with {current_input}")
 
@@ -205,6 +231,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
+            unrecorded = []
 
             # Check if output function signaled a route
             if self.agent_deps.next_agent:

@@ -99,3 +99,25 @@ async def test_handoffs_quote_the_customer_word_for_word():
 
     await route_from_investment_to_supervisor(ctx, "123")
     assert "Vacation with $5000" in ctx.deps.trigger_message
+
+
+async def test_agents_get_their_instructions_with_a_shared_history():
+    # The agents share one message history, so a system prompt would only be sent on the
+    # very first request. Instructions are sent on every request.
+    from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    from common.agent_constants import OPEN_ACCOUNT_INSTRUCTIONS
+    from common.agents import open_account_agent
+
+    sent = []
+
+    def capture(messages: list[ModelMessage], info: AgentInfo):
+        sent.append(messages[-1].instructions)
+        raise RuntimeError("captured")
+
+    history = [ModelRequest(parts=[UserPromptPart("Hi, my client id is 123")]),
+               ModelResponse(parts=[TextPart("Thanks, how can I help?")])]
+    with open_account_agent.override(model=FunctionModel(capture)), pytest.raises(RuntimeError):
+        await open_account_agent.run("Yes", deps=AgentDependencies(), message_history=history)
+    assert sent == [OPEN_ACCOUNT_INSTRUCTIONS]
