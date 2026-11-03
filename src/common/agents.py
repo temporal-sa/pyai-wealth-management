@@ -675,7 +675,8 @@ def check_for_confirmation_in_history(context: RunContext[AgentDependencies], ac
 ### Managers
 
 beneficiaries_mgr = BeneficiariesManager()
-investment_mgr = InvestmentManager()
+# No shared InvestmentManager: it reads the file once, and accounts are also opened
+# and removed by activities, so a shared one goes stale and saves over their changes.
 
 ### Agents
 
@@ -911,7 +912,7 @@ async def list_investments(
                 break
 
     await core_banking_api()
-    return investment_mgr.list_investment_accounts(context.deps.client_id)
+    return InvestmentManager().list_investment_accounts(context.deps.client_id)
 
 
 # @investment_agent.tool
@@ -925,7 +926,7 @@ async def list_investments(
 #         name=name,
 #         balance=balance)
 
-#     return investment_mgr.add_investment_account(investment_account)
+#     return InvestmentManager().add_investment_account(investment_account)
 
 @investment_agent.tool
 async def close_investment(context: RunContext[AgentDependencies],
@@ -987,7 +988,7 @@ async def close_investment(context: RunContext[AgentDependencies],
                 break
 
     await core_banking_api()
-    return investment_mgr.delete_investment_account(
+    return InvestmentManager().delete_investment_account(
         client_id=context.deps.client_id,
         investment_id=investment_id)
 
