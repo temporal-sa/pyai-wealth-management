@@ -36,7 +36,7 @@ from temporal_supervisor.retry_policies import LLM_RETRY_POLICY, TOOL_RETRY_POLI
 with workflow.unsafe.imports_passed_through():
     from temporal_supervisor.model_config import LLM_TASK_QUEUE
 
-def _temporal_agent(agent: Agent) -> TemporalAgent:
+def _temporal_agent(agent: Agent, workflow_tools: tuple = ()) -> TemporalAgent:
     # Tool calls and model calls retry for as long as an outage lasts. Model calls
     # run on their own task queue so they can be rate limited without slowing the tools.
     # TemporalAgent adds to the retry policy it is given, so each agent gets its own copy.
@@ -54,9 +54,12 @@ def _temporal_agent(agent: Agent) -> TemporalAgent:
                 LLM_RETRY_POLICY, non_retryable_error_types=["UserError", "PydanticUserError"]
             ),
         ),
+        # Tools run as activities, so changes they make to deps are lost. These only
+        # read or set deps and do no I/O, so they run in the workflow instead.
+        tool_activity_config={"<agent>": {name: False for name in workflow_tools}},
     )
 
-temporal_super_agent = _temporal_agent(supervisor_agent)
+temporal_super_agent = _temporal_agent(supervisor_agent, workflow_tools=("get_client_id", "set_client_id"))
 temporal_bene_agent = _temporal_agent(beneficiary_agent)
 temporal_invest_agent = _temporal_agent(investment_agent)
 temporal_open_account_agent = _temporal_agent(open_account_agent)
