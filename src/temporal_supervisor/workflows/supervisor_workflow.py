@@ -167,6 +167,9 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
     async def _process_user_message(self, chat_interaction: ChatInteraction, user_input: str):
         workflow.logger.info(f"Processing user message of {user_input}")
 
+        # Handoffs quote the customer's own words to the next agent
+        self.agent_deps.customer_message = user_input
+
         # Add user input to history before running agent
         user_message = ModelRequest(
             parts=[UserPromptPart(
