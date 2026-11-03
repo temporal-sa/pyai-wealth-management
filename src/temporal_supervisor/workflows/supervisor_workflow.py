@@ -158,7 +158,7 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         )
 
     async def _process_status_update(self, state_input: UpdateAccountOpeningStateInput):
-        status_message = f"New {state_input.account_name} accountstatus changed: {state_input.state}"
+        status_message = f"New {state_input.account_name} account status changed: {state_input.state}"
         workflow.logger.info(f"processing status update: {status_message}")
 
         if state_input.state.startswith(ACCOUNT_OPENING_ENDED):
