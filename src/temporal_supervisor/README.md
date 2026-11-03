@@ -211,6 +211,95 @@ Here is a sample event history shown in the Temporal UX
 
 ![](../../images/temporal-ux-session.png)
 
+## Failure scenarios (chaos panel)
+
+Click **Chaos** in the chat header to open the chaos panel. Its switches inject
+failures at runtime: activities, agent tools and the model read the flags from
+Redis on every attempt, so you can turn a failure on and off mid-conversation
+without restarting anything. The panel also lists each injected failure as it
+happens (activity and attempt number). Open the [Temporal UI](http://localhost:8233)
+alongside it to show the pending activity, its attempt count, and the last
+failure. **Reset all** turns every flag off.
+
+| Scenario | How to show it | What Temporal does |
+|---|---|---|
+| **Tool / API down** | Turn on *Core banking API down*, then ask to list your investments or beneficiaries (or open an account, so it fails after compliance approval). Turn it off. | The tool activity retries (1s backoff, capped at 5s) for as long as the outage lasts. The agent waits mid-turn and answers once the API is back. Nothing is lost or re-asked. |
+| **LLM down** | Turn on *OpenAI API down* and send a message. Turn it off. | The model call is an activity, so it retries the same way (capped at 10s). The conversation picks up exactly where it was. |
+| **LLM rate limited (reactive)** | Turn on *OpenAI rate limited (429)* and send a message. | The model raises an `ApplicationError` with `next_retry_delay` (15s, like a `Retry-After` header), which overrides the retry policy's backoff. Real OpenAI 429s are handled the same way (`ChaosAwareModel` in `model_config.py`). |
+| **LLM rate limited (proactive)** | Start the worker with `LLM_MAX_CALLS_PER_SECOND=0.2`, then chat in several browser tabs at once. | Model calls run on their own task queue (`PY-AI-Supervisor-llm`). The Temporal service dispatches at most that many per second across *all* workers, so calls queue up instead of hitting the provider's limit. Tools on the main queue aren't slowed down. |
+| **Business rule (non-retryable)** | Ask to open an account with $2,000,000 (or less than $100). | `validate_new_account` raises a non-retryable `ApplicationError`: one attempt, no retries. The reason goes back to the customer before any account opening starts. Compare it with *Tool / API down* in the Temporal UI. |
+| **Saga** | Turn on *Custodian rejects new accounts* (and *Slow account-opening steps* so you can watch), then open an account through compliance approval. Without flags: as client `123`, open an account with $300,000 (the linked bank account has $250,000). | After compliance approval the child workflow creates the account record, transfers the deposit from the linked bank account, and registers with the custodian. When a step fails non-retryably, the completed steps are undone in reverse order (refund, then remove the account). Compensations are activities too, so they are retried until they succeed. Kill the worker mid-rollback and the rollback still finishes. Transfers are idempotent, so a retried debit or refund never moves money twice. |
+| **Bug in workflow code** | Turn on *Bug in workflow code*, then open an account through compliance approval. See below. | The workflow pauses at the failing line, keeping all its state, until a worker with fixed code picks it up. |
+
+Every scenario works with both the Python and the [Java](../../java/README.md)
+account opening workflow. The failures are injected in the Python activities,
+which the Java workflow calls too, and both workflows implement the same saga and
+the same kind of bug.
+
+The linked bank balances and transfers are kept in `data/funding_accounts.json`.
+To reset the demo data after a few runs:
+
+```bash
+git checkout data/
+```
+
+### Bug in the workflow code
+
+Turn on **Bug in workflow code**, then open an account and approve KYC and
+compliance. While the switch is on, `find_promotion` gives new account openings a
+`WELCOME-BONUS` promo code, which is passed to `OpenInvestmentAccountWorkflow` as
+part of its input. The welcome-bonus code path has a real bug, and openings
+without the promo code never reach it:
+
+* **Python** (`_welcome_bonus` in `workflows/open_account_workflow.py`) reads
+  `inputs.initial_deposit`, a field that doesn't exist, and raises
+  `AttributeError: 'OpenInvestmentAccountInput' object has no attribute 'initial_deposit'`.
+* **Java** (`OpenInvestmentAccountWorkflowImpl.java`) looks up the promotion rate
+  under the wrong key (`WELCOME_BONUS` instead of `WELCOME-BONUS`), and unboxing
+  the missing rate raises a `NullPointerException`.
+
+In both SDKs an ordinary exception fails the *workflow task*, not the workflow, so
+the workflow stays **Running**, paused right after compliance approval with the
+approval intact. The Temporal UI shows the failing workflow task and its stack
+trace. Other conversations, and openings without the promo code, keep working.
+
+Turning the switch off doesn't help: the promo code is part of the workflow's
+input, so every retry hits the same line. The fix is code:
+
+* Python: change `inputs.initial_deposit` to `inputs.initial_amount`, the line
+  commented out above it, and restart the Python worker.
+* Java: swap `PROMOTION_RATES` for the commented-out line above it, and restart
+  the Java worker.
+
+The workflow resumes on the server's next workflow-task retry and opens the
+account with the bonus. Workflow-task retries back off over time, up to 10
+minutes. If the fix is deployed within a couple of minutes, the workflow resumes
+within about a minute.
+
+After the demo, re-arm the bug:
+
+```bash
+git checkout src/temporal_supervisor/workflows/open_account_workflow.py
+git checkout java/src/main/java/io/temporal/demo/wealthmanagement/workflow/OpenInvestmentAccountWorkflowImpl.java
+```
+
+### Running the tests
+
+The failure scenarios have tests that run against a local Temporal test server
+(downloaded automatically on first run) with stub activities. They need no
+OpenAI API key or Redis.
+
+```bash
+uv run pytest
+```
+
+And for the Java workflow (Java 17 or 21):
+
+```bash
+cd java
+./gradlew test
+```
+
 ### Running from the command line
 
 Alternatively you can interact with workflow using the temporal CLI 

@@ -1,5 +1,4 @@
 import logging
-from datetime import timedelta
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -17,6 +16,7 @@ from common.investment_manager import InvestmentManager, InvestmentAccount
 from common.domain_classes import OpenInvestmentAccountInput, WealthManagementClient
 
 from temporalio import workflow
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.workflow import ParentClosePolicy
 from temporalio.client import Client, WorkflowHandle
 
@@ -24,6 +24,11 @@ from common.client_helper import ClientHelper
 from temporal_supervisor.workflows.open_account_workflow import OpenInvestmentAccountWorkflow
 from temporal_supervisor.activities.open_account import OpenAccount
 from temporal_supervisor.activities.investments import Investments
+from temporal_supervisor.retry_policies import TOOL_RETRY_POLICY, TOOL_START_TO_CLOSE_TIMEOUT
+
+with workflow.unsafe.imports_passed_through():
+    from temporal_supervisor.chaos import core_banking_api
+    from temporal_supervisor.model_config import ChaosAwareModel
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +131,8 @@ async def route_to_investment_agent(ctx: RunContext[AgentDependencies], client_i
         investments_list = await workflow.execute_activity(
             Investments.list_investments,
             args=[client_id],
-            schedule_to_close_timeout=timedelta(seconds=30)
+            start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
+            retry_policy=TOOL_RETRY_POLICY,
         )
 
         # Format the data for the agent
@@ -385,6 +391,30 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
         account_info = ctx.deps.pending_account_info
         workflow.logger.info(f"Auto-processing account opening for {account_info.account_name}")
 
+        # Business rules are checked before the account opening starts. A violation is
+        # non-retryable: one attempt, and the reason is passed back to the customer.
+        try:
+            await workflow.execute_activity(
+                Investments.validate_new_account,
+                args=[account_info.client_id, account_info.account_name, account_info.initial_amount],
+                start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
+                retry_policy=TOOL_RETRY_POLICY,
+            )
+        except ActivityError as e:
+            ctx.deps.pending_account_info = None
+            if isinstance(e.__cause__, ApplicationError):
+                return f"The {account_info.account_name} account cannot be opened: {e.__cause__.message}."
+            raise
+
+        # The promotion is looked up in an activity, so the workflow-bug chaos flag
+        # only changes the child workflow's input, never the workflow code path itself.
+        account_info.promo_code = await workflow.execute_activity(
+            Investments.find_promotion,
+            args=[account_info.client_id],
+            start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
+            retry_policy=TOOL_RETRY_POLICY,
+        )
+
         try:
             # 1. Start the child workflow automatically by calling the tool function directly
             workflow_id = await start_account_opening_workflow(ctx, account_info)
@@ -397,7 +427,8 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
             client = await workflow.execute_activity(
                 OpenAccount.get_current_client_info,
                 args=[workflow_id],
-                schedule_to_close_timeout=timedelta(seconds=30) ## TODO: remove hard coding
+                start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
+                retry_policy=TOOL_RETRY_POLICY,
             )
 
             workflow.logger.info(f"Retrieved client info for {client.first_name} {client.last_name}")
@@ -588,8 +619,11 @@ investment_mgr = InvestmentManager()
 
 ### Agents
 
+# Honors the LLM chaos flags and turns OpenAI 429s into a Retry-After style delay.
+agent_model = ChaosAwareModel(AGENT_MODEL)
+
 supervisor_agent = Agent(
-    AGENT_MODEL,
+    agent_model,
     name=SUPERVISOR_AGENT_NAME,
     deps_type=AgentDependencies,
     output_type=[
@@ -601,7 +635,7 @@ supervisor_agent = Agent(
 )
 
 beneficiary_agent = Agent(
-    AGENT_MODEL,
+    agent_model,
     name=BENE_AGENT_NAME,
     deps_type=AgentDependencies,
     output_type=[
@@ -612,7 +646,7 @@ beneficiary_agent = Agent(
 )
 
 investment_agent = Agent(
-    AGENT_MODEL,
+    agent_model,
     name=INVEST_AGENT_NAME,
     deps_type=AgentDependencies,
     output_type=[
@@ -624,7 +658,7 @@ investment_agent = Agent(
 )
 
 open_account_agent = Agent(
-    AGENT_MODEL,
+    agent_model,
     name=OPEN_ACCOUNT_AGENT_NAME,
     deps_type=AgentDependencies,
     output_type=[
@@ -675,6 +709,7 @@ async def add_beneficiaries(
         context: RunContext[AgentDependencies],
         first_name: str, last_name: str, relationship: str
 ) -> None:
+    await core_banking_api()
     beneficiaries_mgr.add_beneficiary(context.deps.client_id, first_name, last_name, relationship)
 
 @beneficiary_agent.tool
@@ -685,6 +720,7 @@ async def list_beneficiaries(
     """
     List the beneficiaries for the given client id.
     """
+    await core_banking_api()
     return beneficiaries_mgr.list_beneficiaries(context.deps.client_id)
 
 @beneficiary_agent.tool
@@ -750,6 +786,7 @@ async def delete_beneficiaries(
                     break
 
         # Look up the beneficiary by name to get the ID
+        await core_banking_api()
         beneficiaries = beneficiaries_mgr.list_beneficiaries(context.deps.client_id)
         full_name = f"{first_name} {last_name}".lower()
 
@@ -811,6 +848,7 @@ async def list_investments(
                         break
                 break
 
+    await core_banking_api()
     return investment_mgr.list_investment_accounts(context.deps.client_id)
 
 
@@ -886,6 +924,7 @@ async def close_investment(context: RunContext[AgentDependencies],
                     break
                 break
 
+    await core_banking_api()
     return investment_mgr.delete_investment_account(
         client_id=context.deps.client_id,
         investment_id=investment_id)

@@ -22,6 +22,9 @@ Scenarios currently implmeneted include:
 
 You can run through the scenarios with the Temporal version using a [Web Application](src/frontend/README.md) 
 
+The Temporal version also has a chaos panel that injects failures (API and LLM outages, rate limits, a saga rollback and a bug in workflow code) to show how Temporal handles them. See
+[Failure scenarios](src/temporal_supervisor/README.md#failure-scenarios-chaos-panel).
+
 ## Prerequisities
 * [uv](https://docs.astral.sh/uv/) - Python package and project manager
 * [OpenAI API Key] (https://platform.openai.com/api-keys) - Your key to accessing OpenAI's LLM

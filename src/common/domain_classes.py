@@ -6,6 +6,7 @@ class OpenInvestmentAccountInput:
     client_id: str
     account_name: str
     initial_amount: float
+    promo_code: Optional[str] = None
 
 @dataclass
 class OpenInvestmentAccountOutput:

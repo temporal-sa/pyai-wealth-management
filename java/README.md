@@ -54,6 +54,20 @@ the Java worker. Send the compliance approval from `src/temporal_supervisor` as 
 ./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
+## Failure scenarios and tests
+
+The chaos panel scenarios all work with the Java workflow. The Java workflow implements the same
+account opening saga as the Python one, and has its own version of the "Bug in workflow code" bug in
+`OpenInvestmentAccountWorkflowImpl.java`. See
+[Failure scenarios](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel).
+
+The workflow's tests run against Temporal's in-memory test environment, with stubs for the Python
+activities:
+
+```shell
+./gradlew test
+```
+
 ## Running Using Temporal Cloud
 
 The Java worker reads its connection settings from these environment variables. They have different names

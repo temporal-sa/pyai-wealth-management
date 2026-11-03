@@ -1,10 +1,12 @@
 import asyncio
+import dataclasses
 
 from datetime import timedelta
 from typing import List
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.workflow import ActivityConfig
 
 from pydantic_ai import Agent, ModelMessage
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -29,11 +31,35 @@ from common.status_update import StatusUpdate
 
 from temporal_supervisor.activities.event_stream_activities import EventStreamActivities
 from temporal_supervisor.activities.local_activities import LocalActivities
+from temporal_supervisor.retry_policies import LLM_RETRY_POLICY, TOOL_RETRY_POLICY
 
-temporal_super_agent = TemporalAgent(supervisor_agent)
-temporal_bene_agent = TemporalAgent(beneficiary_agent)
-temporal_invest_agent = TemporalAgent(investment_agent)
-temporal_open_account_agent = TemporalAgent(open_account_agent)
+with workflow.unsafe.imports_passed_through():
+    from temporal_supervisor.model_config import LLM_TASK_QUEUE
+
+def _temporal_agent(agent: Agent) -> TemporalAgent:
+    # Tool calls and model calls retry for as long as an outage lasts. Model calls
+    # run on their own task queue so they can be rate limited without slowing the tools.
+    # TemporalAgent adds to the retry policy it is given, so each agent gets its own copy.
+    return TemporalAgent(
+        agent,
+        activity_config=ActivityConfig(
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=dataclasses.replace(TOOL_RETRY_POLICY),
+        ),
+        model_activity_config=ActivityConfig(
+            task_queue=LLM_TASK_QUEUE,
+            # Replaces the base policy for model calls, so keep the errors
+            # TemporalAgent marks as non-retryable on it.
+            retry_policy=dataclasses.replace(
+                LLM_RETRY_POLICY, non_retryable_error_types=["UserError", "PydanticUserError"]
+            ),
+        ),
+    )
+
+temporal_super_agent = _temporal_agent(supervisor_agent)
+temporal_bene_agent = _temporal_agent(beneficiary_agent)
+temporal_invest_agent = _temporal_agent(investment_agent)
+temporal_open_account_agent = _temporal_agent(open_account_agent)
 
 @workflow.defn
 class WealthManagementWorkflow(PydanticAIWorkflow):

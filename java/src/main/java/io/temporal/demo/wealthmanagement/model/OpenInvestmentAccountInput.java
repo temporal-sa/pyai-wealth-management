@@ -9,4 +9,5 @@ public class OpenInvestmentAccountInput {
     private String client_id;
     private String account_name;
     private float initial_amount;
+    private String promo_code;
 }
