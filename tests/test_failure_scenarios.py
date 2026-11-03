@@ -318,3 +318,11 @@ async def test_supervisor_workflow_passes_sandbox_validation(temporal_env):
         plugins=[PydanticAIPlugin()],
     ):
         pass
+
+
+def test_client_id_tools_run_in_the_workflow():
+    # set_client_id changes deps, which would be lost if it ran in an activity.
+    from temporal_supervisor.workflows.supervisor_workflow import temporal_super_agent
+
+    toolset = next(t for t in temporal_super_agent._toolsets if t.id == "<agent>")
+    assert toolset.tool_activity_config == {"get_client_id": False, "set_client_id": False}

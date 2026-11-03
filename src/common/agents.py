@@ -2,7 +2,10 @@ import logging
 from typing import Optional
 from dataclasses import dataclass, asdict
 
+import re
+
 from pydantic_ai import Agent, RunContext, ModelRetry
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart, UserPromptPart
 
 from common.agent_constants import (
     AGENT_MODEL,
@@ -16,7 +19,7 @@ from common.investment_manager import InvestmentManager, InvestmentAccount
 from common.domain_classes import OpenInvestmentAccountInput, WealthManagementClient
 
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 from temporalio.workflow import ParentClosePolicy
 from temporalio.client import Client, WorkflowHandle
 
@@ -57,6 +60,8 @@ class AgentDependencies:
     trigger_message: Optional[str] = None  # Message for next agent
     current_agent_name: str = SUPERVISOR_AGENT_NAME  # For debugging/logging
     message_history: list = None  # Message history for confirmation checking
+    customer_message: Optional[str] = None  # The customer's latest chat message, word for word
+    kyc_pending: bool = False  # KYC details shown to the customer and awaiting their confirmation
     pending_account_info: Optional[OpenInvestmentAccountInput] = None  # Account info being passed between agents
     task_queue_open_account: Optional[str] = None  # Task queue for opening account child workflows
     active_account_workflow_id: Optional[str] = None  # Workflow ID for active account opening process
@@ -65,6 +70,38 @@ class AgentDependencies:
     def __post_init__(self):
         if self.message_history is None:
             self.message_history = []
+
+### Handoff helpers
+
+def customer_said(ctx: RunContext[AgentDependencies]) -> str:
+    """Quote the customer's latest message for the next agent.
+
+    Agents only see the handoff message as their input, so it carries the customer's
+    words verbatim rather than a paraphrase the next agent has to guess from.
+    """
+    return f'The customer\'s latest message, word for word: "{ctx.deps.customer_message or ""}"'
+
+
+KYC_TOOLS = ("approve_client_kyc", "update_kyc_details")
+CONFIRMATION = re.compile(
+    r"^\s*(y|yes|yeah|yep|sure|ok|okay|correct|confirm(ed)?|approved?|that'?s (right|correct)|looks (good|right)|all good)\b",
+    re.IGNORECASE,
+)
+
+
+def kyc_tool_ran_this_turn(ctx: RunContext[AgentDependencies]) -> bool:
+    """Whether approve_client_kyc or update_kyc_details was called since this agent run's prompt.
+
+    A call made in the same model response as the output function counts too: with
+    end_strategy='exhaustive' it runs even though its result may not be in ctx.messages yet.
+    """
+    for message in reversed(ctx.messages):
+        for part in getattr(message, 'parts', []):
+            if isinstance(part, (ToolCallPart, ToolReturnPart)) and part.tool_name in KYC_TOOLS:
+                return True
+            if isinstance(part, UserPromptPart):
+                return False
+    return False
 
 ### Output Functions
 
@@ -96,7 +133,7 @@ async def route_to_beneficiary_agent(ctx: RunContext[AgentDependencies], client_
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = BENE_AGENT_NAME
-        ctx.deps.trigger_message = "Process the user's beneficiary request from the conversation history."
+        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nHandle the customer's latest message."
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -141,9 +178,14 @@ async def route_to_investment_agent(ctx: RunContext[AgentDependencies], client_i
             for inv in investments_list:
                 formatted_data += f"- {inv['name']}: ${inv['balance']:.2f} (ID: {inv['investment_id']})\n"
 
-            ctx.deps.trigger_message = f"Here is the current investment data for client {client_id}:\n\n{formatted_data}\nRespond to the user's request using this data."
+            investment_data = f"Here is the current investment data for client {client_id}:\n\n{formatted_data}"
         else:
-            ctx.deps.trigger_message = f"Client {client_id} has NO investment accounts in the system. Handle the user's request accordingly."
+            investment_data = f"Client {client_id} has NO investment accounts in the system."
+        ctx.deps.trigger_message = (
+            f"{customer_said(ctx)}\n\n{investment_data}\n"
+            "Handle the customer's latest message. If it asks to open a new account with a name and an amount, "
+            "route it to the Open Account Agent instead of listing the accounts."
+        )
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -220,7 +262,7 @@ async def route_from_beneficiary_to_supervisor(ctx: RunContext[AgentDependencies
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = "The user has a new request. Route it to the appropriate agent."
+        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -302,7 +344,7 @@ async def route_from_investment_to_supervisor(ctx: RunContext[AgentDependencies]
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = "The user has a new request. Route it to the appropriate agent."
+        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -386,6 +428,18 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
                 "you MUST use route_from_open_account_to_supervisor(client_id) instead."
             )
 
+    # A customer confirming their KYC details must reach the workflow. Telling them it's
+    # approved without calling the tool leaves the account opening waiting for KYC.
+    if ctx.deps.kyc_pending:
+        if kyc_tool_ran_this_turn(ctx):
+            ctx.deps.kyc_pending = False
+        elif CONFIRMATION.match(ctx.deps.customer_message or ""):
+            raise ModelRetry(
+                "The customer confirmed their information is correct, but approve_client_kyc() has not "
+                "been called, so the account opening is still waiting for KYC. Call approve_client_kyc() "
+                "now, then respond with respond_about_account_opening."
+            )
+
     # AUTO-HANDLE: If we have pending_account_info, automatically process the account opening
     if ctx.deps.pending_account_info is not None:
         account_info = ctx.deps.pending_account_info
@@ -417,7 +471,12 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
 
         try:
             # 1. Start the child workflow automatically by calling the tool function directly
-            workflow_id = await start_account_opening_workflow(ctx, account_info)
+            try:
+                workflow_id = await start_account_opening_workflow(ctx, account_info)
+            except WorkflowAlreadyStartedError:
+                ctx.deps.pending_account_info = None
+                return (f"Your {account_info.account_name} account is already being opened. "
+                        f"Its status updates will appear here as it progresses.")
             workflow.logger.info(f"Started workflow: {workflow_id}")
 
             # Store workflow_id in deps so agent can access it for subsequent operations
@@ -452,6 +511,7 @@ Is this information correct and up to date? Please confirm.
 
             # Clear pending_account_info since we've processed it
             ctx.deps.pending_account_info = None
+            ctx.deps.kyc_pending = True
             workflow.logger.info("Cleared pending_account_info")
 
         except Exception as e:
@@ -552,7 +612,7 @@ async def route_from_open_account_to_supervisor(ctx: RunContext[AgentDependencie
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = "The user has a new request. Route it to the appropriate agent."
+        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -615,7 +675,8 @@ def check_for_confirmation_in_history(context: RunContext[AgentDependencies], ac
 ### Managers
 
 beneficiaries_mgr = BeneficiariesManager()
-investment_mgr = InvestmentManager()
+# No shared InvestmentManager: it reads the file once, and accounts are also opened
+# and removed by activities, so a shared one goes stale and saves over their changes.
 
 ### Agents
 
@@ -631,7 +692,7 @@ supervisor_agent = Agent(
         route_to_beneficiary_agent,
         route_to_investment_agent
     ],
-    system_prompt=SUPERVISOR_INSTRUCTIONS,
+    instructions=SUPERVISOR_INSTRUCTIONS,
 )
 
 beneficiary_agent = Agent(
@@ -642,7 +703,7 @@ beneficiary_agent = Agent(
         respond_about_beneficiaries,
         route_from_beneficiary_to_supervisor
     ],
-    system_prompt=BENE_INSTRUCTIONS,
+    instructions=BENE_INSTRUCTIONS,
 )
 
 investment_agent = Agent(
@@ -654,7 +715,7 @@ investment_agent = Agent(
         route_from_investment_to_supervisor,
         route_from_investment_to_open_account,
     ],
-    system_prompt=INVEST_INSTRUCTIONS,
+    instructions=INVEST_INSTRUCTIONS,
 )
 
 open_account_agent = Agent(
@@ -665,8 +726,10 @@ open_account_agent = Agent(
         respond_about_account_opening,
         route_from_open_account_to_supervisor,
     ],
-    system_prompt=OPEN_ACCOUNT_INSTRUCTIONS,
+    instructions=OPEN_ACCOUNT_INSTRUCTIONS,
     end_strategy='exhaustive',
+    # Room for the output checks in respond_about_account_opening to send the model back.
+    output_retries=3,
 )
 
 ### Tools
@@ -849,7 +912,7 @@ async def list_investments(
                 break
 
     await core_banking_api()
-    return investment_mgr.list_investment_accounts(context.deps.client_id)
+    return InvestmentManager().list_investment_accounts(context.deps.client_id)
 
 
 # @investment_agent.tool
@@ -863,7 +926,7 @@ async def list_investments(
 #         name=name,
 #         balance=balance)
 
-#     return investment_mgr.add_investment_account(investment_account)
+#     return InvestmentManager().add_investment_account(investment_account)
 
 @investment_agent.tool
 async def close_investment(context: RunContext[AgentDependencies],
@@ -925,7 +988,7 @@ async def close_investment(context: RunContext[AgentDependencies],
                 break
 
     await core_banking_api()
-    return investment_mgr.delete_investment_account(
+    return InvestmentManager().delete_investment_account(
         client_id=context.deps.client_id,
         investment_id=investment_id)
 
@@ -968,8 +1031,9 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
 
         return child_workflow_id
     except Exception as e:
+        # Raised rather than returned: the caller uses the result as a workflow ID.
         logger.error(f"Error starting account opening workflow: {e}")
-        return f"Error starting workflow: {str(e)}"
+        raise
 
 @open_account_agent.tool
 async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:
