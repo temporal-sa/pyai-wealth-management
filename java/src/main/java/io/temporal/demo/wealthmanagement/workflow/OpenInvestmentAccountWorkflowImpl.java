@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @WorkflowImpl
 public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountWorkflow {
@@ -95,8 +96,10 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     private OpenInvestmentAccountOutput openAccount() {
         double amount = inputs.getInitial_amount();
         double bonus = inputs.getPromo_code() != null ? welcomeBonus() : 0.0;
-        // Stable across retries and replays, so a transfer is only ever applied once.
-        String transferId = Workflow.getInfo().getWorkflowId() + "-initial-deposit";
+        // Idempotency key: stable across activity retries and worker restarts. It
+        // includes the run ID because the workflow ID is reused when the customer
+        // opens an account with the same name again (e.g. after a rollback).
+        String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId() + "-initial-deposit";
         List<Compensation> compensations = new ArrayList<>();
         try {
             setState("Creating the account record.");
@@ -185,8 +188,12 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     }
 
     private void updateParentState(String state) {
-        String parentWfId = Workflow.getInfo().getParentWorkflowId().orElse("<missing parent workflow id>");
+        Optional<String> parentWfId = Workflow.getInfo().getParentWorkflowId();
+        if (parentWfId.isEmpty()) {
+            return;
+        }
         // use an activity because the parent is on a different Task Queue
-        updateParent.changeState(parentWfId, this.inputs.getAccount_name(), state);
+        updateParent.changeState(parentWfId.get(), this.inputs.getAccount_name(), state,
+                Workflow.getInfo().getWorkflowId());
     }
 }

@@ -8,9 +8,13 @@ import os
 from datetime import timedelta
 from typing import Any, Optional
 
+from openai import AsyncOpenAI
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelResponse
+from pydantic_ai.models import Model, cached_async_http_client
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from temporalio.exceptions import ApplicationError
 
 from common.chaos_manager import ChaosFlag
@@ -18,7 +22,11 @@ from temporal_supervisor.chaos import inject_failure
 
 # Same default as ClientHelper.taskQueue.
 TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "PY-AI-Supervisor")
-LLM_TASK_QUEUE = os.getenv("TEMPORAL_LLM_TASK_QUEUE", f"{TASK_QUEUE}-llm")
+# TEMPORAL_TASK_QUEUE_LLM is the name the OpenAI Agents SDK version uses;
+# TEMPORAL_LLM_TASK_QUEUE is still accepted.
+LLM_TASK_QUEUE = (os.getenv("TEMPORAL_TASK_QUEUE_LLM")
+                  or os.getenv("TEMPORAL_LLM_TASK_QUEUE")
+                  or f"{TASK_QUEUE}-llm")
 
 
 def _optional_float(name: str) -> Optional[float]:
@@ -41,6 +49,20 @@ def _rate_limited(message: str) -> ApplicationError:
         type="ModelRateLimited",
         next_retry_delay=RATE_LIMIT_RETRY_AFTER,
     )
+
+
+def agent_model(model_name: str) -> Model | str:
+    """The model the agents call.
+
+    OpenAI models get a client that never retries on its own, so Temporal's
+    activity retry policy (LLM_RETRY_POLICY) alone decides how a failed model
+    call is retried. Other model names are left for Pydantic AI to resolve.
+    """
+    provider_name, _, name = model_name.partition(":")
+    if provider_name != "openai":
+        return model_name
+    openai_client = AsyncOpenAI(max_retries=0, http_client=cached_async_http_client(provider="openai"))
+    return OpenAIChatModel(name, provider=OpenAIProvider(openai_client=openai_client))
 
 
 class ChaosAwareModel(WrapperModel):

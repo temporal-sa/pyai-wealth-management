@@ -23,3 +23,6 @@ setclaimcheck.sh
 **/.DS_Store
 **/._.DS_Store
 
+
+# Personal Temporal Cloud settings (copy src/temporal_supervisor/setcloudenv.example)
+setcloudenv.sh

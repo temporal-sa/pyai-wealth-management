@@ -14,7 +14,7 @@ import io.temporal.serviceclient.WorkflowServiceStubsOptions;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
 import javax.net.ssl.SSLException;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;

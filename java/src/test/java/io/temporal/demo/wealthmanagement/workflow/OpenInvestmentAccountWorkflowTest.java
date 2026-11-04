@@ -44,6 +44,8 @@ class OpenInvestmentAccountWorkflowTest {
     private final List<String> calls = Collections.synchronizedList(new ArrayList<>());
     // Activity name -> "reject" (non-retryable failure) or a number of transient failures.
     private final Map<String, Object> failures = new HashMap<>();
+    // Transfer IDs the workflow passed to debit_linked_account, in order.
+    private final List<String> debitTransferIds = Collections.synchronizedList(new ArrayList<>());
 
     private TestWorkflowEnvironment env;
     private WorkflowClient client;
@@ -64,6 +66,7 @@ class OpenInvestmentAccountWorkflowTest {
                     return Map.of("investment_id", INVESTMENT_ID, "name", "Test", "balance", 500.0);
                 case "debit_linked_account":
                     calls.add("debit:" + args.get(1, Double.class));
+                    debitTransferIds.add(args.get(2, String.class));
                     maybeFail(name, attempt);
                     return Map.of();
                 case "credit_linked_account":
@@ -96,7 +99,7 @@ class OpenInvestmentAccountWorkflowTest {
     /** The workflow has no parent in these tests, so there is nothing to signal. */
     private static class NoParent implements UpdateParentWorkflow {
         @Override
-        public void changeState(String parentWorkflowId, String accountName, String state) {
+        public void changeState(String parentWorkflowId, String accountName, String state, String workflowId) {
         }
     }
 
@@ -117,10 +120,14 @@ class OpenInvestmentAccountWorkflowTest {
     }
 
     private OpenInvestmentAccountWorkflow startAndApprove(String promoCode) {
+        return startAndApprove(promoCode, "open-account-test-" + UUID.randomUUID());
+    }
+
+    private OpenInvestmentAccountWorkflow startAndApprove(String promoCode, String workflowId) {
         OpenInvestmentAccountWorkflow workflow = client.newWorkflowStub(
                 OpenInvestmentAccountWorkflow.class,
                 WorkflowOptions.newBuilder()
-                        .setWorkflowId("open-account-test-" + UUID.randomUUID())
+                        .setWorkflowId(workflowId)
                         .setTaskQueue(ServerInfo.getTaskqueue())
                         .build());
         OpenInvestmentAccountInput input = new OpenInvestmentAccountInput();
@@ -164,6 +171,23 @@ class OpenInvestmentAccountWorkflowTest {
         // The debit never happened, so there is nothing to refund.
         assertEquals(List.of("get_client", "open_investment#1", "debit:500.0",
                 "remove_investment:" + INVESTMENT_ID), calls);
+    }
+
+    @Test
+    void reopenAfterRollbackUsesANewTransferId() {
+        // The parent reuses the workflow ID when an account with the same name is opened
+        // again, so the transfer ID must differ per run or the second debit is a no-op.
+        String workflowId = "open-account-test-" + UUID.randomUUID();
+        failures.put("register_account", "reject");
+        OpenInvestmentAccountWorkflow first = startAndApprove(null, workflowId);
+        assertFalse(WorkflowStub.fromTyped(first).getResult(OpenInvestmentAccountOutput.class).isAccount_created());
+
+        failures.clear();
+        OpenInvestmentAccountWorkflow second = startAndApprove(null, workflowId);
+        assertTrue(WorkflowStub.fromTyped(second).getResult(OpenInvestmentAccountOutput.class).isAccount_created());
+
+        assertEquals(2, debitTransferIds.size());
+        assertFalse(debitTransferIds.get(0).equals(debitTransferIds.get(1)), debitTransferIds.toString());
     }
 
     @Test

@@ -14,6 +14,7 @@ spring:
         insecure-trust-manager: false # or add ca.pem to java default truststore
         # more configuration options https://github.com/temporalio/sdk-java/tree/master/temporal-spring-boot-autoconfigure-alpha#mtls
   # Redis configuration
-  redis:
-    host: localhost
-    port: 6379
+  data:
+    redis:
+      host: localhost
+      port: 6379
