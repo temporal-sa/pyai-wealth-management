@@ -370,6 +370,28 @@ From the repository root:
 uv run pytest
 ```
 
+### Live agent handoff test
+
+`tests/live_agent_handoffs.py` checks that the agents hand off to each other without involving the
+customer. It runs the real `WealthManagementWorkflow` against the real OpenAI model, with the real
+beneficiary and investment activities (which only read `data/*.json`); only the Redis event stream
+activities are replaced with in-memory stand-ins, and the chaos flags are off, so Redis isn't needed.
+The conversation is "Who are my beneficiaries?", "123", then "What investments do I have?". It checks
+that the second reply lists client 123's beneficiaries and that the third, in the same turn, routes from
+the Beneficiary Agent to the supervisor and on to the Investment Agent and lists the Checking, Savings and
+401K accounts, without asking for the client ID again and without any agent mentioning a transfer. Each
+run's transcript, with what each agent did, is printed.
+
+It calls the paid OpenAI API, so it is not part of `uv run pytest` (the file name doesn't match
+`test_*.py`) and is skipped when `OPENAI_API_KEY` isn't set. Run it from the repository root with:
+
+```bash
+source ./setoaikey.sh
+LIVE_TEST_RUNS=10 uv run pytest tests/live_agent_handoffs.py -s
+```
+
+`LIVE_TEST_RUNS=<n>` repeats the conversation n times in one test (default 1), since model output varies.
+
 For the Java workflow (JDK 25):
 
 ```bash
