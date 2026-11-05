@@ -903,31 +903,17 @@ async def list_investments(
     Returns:
         list: Current investment accounts for the client
     """
-    # Check message history to see if this is actually an open request
-    if context.deps.message_history:
-        # Get the most recent user message
-        for msg in reversed(context.deps.message_history):
-            if hasattr(msg, 'parts'):
-                for part in msg.parts:
-                    if hasattr(part, 'content') and isinstance(part.content, str):
-                        content_lower = part.content.lower()
-                        # Check if this is an open request with details
-                        if 'open' in content_lower:
-                            # Look for account name and amount patterns
-                            import re
-                            # Pattern: "open [word] with $[number]" or similar
-                            has_amount = bool(re.search(r'\$\s*\d+|\d+\s*dollars?', content_lower))
-                            # If they said "open" and there's a dollar amount, they should be routed not listed
-                            if has_amount:
-                                raise ModelRetry(
-                                    "ERROR: You called list_investments, but the user asked to OPEN an account with specific details! "
-                                    "The user's request contains 'open' and a dollar amount. "
-                                    "You should NOT list accounts - instead, extract the account name and amount, then call "
-                                    "route_from_investment_to_open_account(client_id, account_info) immediately. "
-                                    "Re-read the user's request and route to Open Account Agent!"
-                                )
-                        break
-                break
+    # An open request with an amount should be routed to the Open Account Agent, not listed.
+    # Reads customer_message for the reasons given in is_unconfirmed_request.
+    message = (context.deps.customer_message or "").lower()
+    if 'open' in message and re.search(r'\$\s*\d+|\d+\s*dollars?', message):
+        raise ModelRetry(
+            "ERROR: You called list_investments, but the user asked to OPEN an account with specific details! "
+            "The user's request contains 'open' and a dollar amount. "
+            "You should NOT list accounts - instead, extract the account name and amount, then call "
+            "route_from_investment_to_open_account(client_id, account_info) immediately. "
+            "Re-read the user's request and route to Open Account Agent!"
+        )
 
     await core_banking_api()
     return InvestmentManager().list_investment_accounts(context.deps.client_id)

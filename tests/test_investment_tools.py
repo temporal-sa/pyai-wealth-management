@@ -3,7 +3,8 @@
 import json
 
 import pytest
-from pydantic_ai import RunContext
+from pydantic import TypeAdapter
+from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
@@ -30,6 +31,14 @@ def _ctx():
     return RunContext(deps=AgentDependencies(client_id="123"), model=TestModel(), usage=RunUsage())
 
 
+def _activity_ctx(customer_message: str):
+    # Tools run as activities, so the deps they see have been serialized
+    adapter = TypeAdapter(AgentDependencies)
+    deps = adapter.validate_python(adapter.dump_python(
+        AgentDependencies(client_id="123", customer_message=customer_message), mode="json"))
+    return RunContext(deps=deps, model=TestModel(), usage=RunUsage())
+
+
 async def test_tools_see_and_keep_accounts_opened_after_the_worker_started(investments_file):
     assert [a["name"] for a in await list_investments(_ctx())] == ["Car"]
 
@@ -45,18 +54,15 @@ async def test_tools_see_and_keep_accounts_opened_after_the_worker_started(inves
 
 
 async def test_closing_needs_the_customer_to_confirm_first(investments_file):
-    from pydantic import TypeAdapter
-    from pydantic_ai import ModelRetry
-
-    def ctx(customer_message):
-        # Tools run as activities, so the deps they see have been serialized
-        adapter = TypeAdapter(AgentDependencies)
-        deps = adapter.validate_python(adapter.dump_python(
-            AgentDependencies(client_id="123", customer_message=customer_message), mode="json"))
-        return RunContext(deps=deps, model=TestModel(), usage=RunUsage())
-
     with pytest.raises(ModelRetry):
-        await close_investment(ctx("Close Car"), "i-car", user_confirmed=True)
+        await close_investment(_activity_ctx("Close Car"), "i-car", user_confirmed=True)
     assert "i-car" in investments_file.read_text()
 
-    assert await close_investment(ctx("Yes"), "i-car", user_confirmed=True)
+    assert await close_investment(_activity_ctx("Yes"), "i-car", user_confirmed=True)
+
+
+async def test_open_requests_are_routed_rather_than_listed(investments_file):
+    with pytest.raises(ModelRetry):
+        await list_investments(_activity_ctx("Open Vacation with $25000"))
+
+    assert [a["name"] for a in await list_investments(_activity_ctx("List my accounts"))] == ["Car"]
