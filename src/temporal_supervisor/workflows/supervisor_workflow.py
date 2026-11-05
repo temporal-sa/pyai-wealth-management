@@ -241,15 +241,6 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         # Handoffs quote the customer's own words to the next agent
         self.agent_deps.customer_message = user_input
 
-        # The first agent run adds the user input to the history, so it is only
-        # added to the copy the tools see until then.
-        unrecorded = [ModelRequest(
-            parts=[UserPromptPart(
-                content=user_input,
-                timestamp=workflow.now()
-            )]
-        )]
-
         current_agent = self._get_current_agent()
         current_input = user_input
 
@@ -257,10 +248,6 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         hops = 0
         # Loop to handle chain routing
         while True:
-            # Sync message history to deps BEFORE running agent, including the user input
-            # (so tools can access confirmation messages in context.deps.message_history)
-            self.agent_deps.message_history = self.message_history + unrecorded
-
             workflow.logger.info(f"Running the current agent of {current_agent} with {current_input}")
 
             # Run the current agent
@@ -272,7 +259,6 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
-            unrecorded = []
 
             # Check if output function signaled a route
             if self.agent_deps.next_agent and hops >= MAX_ROUTING_HOPS:

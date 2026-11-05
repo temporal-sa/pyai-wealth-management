@@ -1,11 +1,9 @@
 import asyncio
 import logging
-import datetime
 
 from typing import List
 
 from pydantic_ai import Agent, ModelMessage
-from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from common.agent_constants import (
     BENE_AGENT_NAME,
@@ -65,24 +63,12 @@ class PydanticAIWealthManagement:
         # Handoffs quote the customer's own words to the next agent
         self.agent_deps.customer_message = user_input
 
-        # The first agent run adds the user input to the history, so it is only
-        # added to the copy the tools see until then.
-        unrecorded = [ModelRequest(
-            parts=[UserPromptPart(
-                content=user_input,
-                timestamp=datetime.datetime.now(datetime.timezone.utc)
-            )]
-        )]
-
         current_agent = self._get_current_agent()
         current_input = user_input
         hops = 0
 
         # Loop to handle chain routing
         while True:
-            # Sync message history to deps before running agent (for confirmation checking)
-            self.agent_deps.message_history = self.message_history + unrecorded
-
             # Run the current agent
             result = await current_agent.run(
                 current_input,
@@ -92,7 +78,6 @@ class PydanticAIWealthManagement:
 
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
-            unrecorded = []
 
             if self.agent_deps.next_agent and hops >= MAX_ROUTING_HOPS:
                 # The agents keep routing to each other. Stop, and let the

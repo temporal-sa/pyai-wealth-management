@@ -59,7 +59,6 @@ class AgentDependencies:
     next_agent: Optional[str] = None  # Signals routing to another agent
     trigger_message: Optional[str] = None  # Message for next agent
     current_agent_name: str = SUPERVISOR_AGENT_NAME  # For debugging/logging
-    message_history: list = None  # Message history for confirmation checking
     customer_message: Optional[str] = None  # The customer's latest chat message, word for word
     kyc_pending: bool = False  # KYC details shown to the customer and awaiting their confirmation
     pending_account_info: Optional[OpenInvestmentAccountInput] = None  # Account info being passed between agents
@@ -69,10 +68,6 @@ class AgentDependencies:
     # Latest state reported by each open-account child workflow, keyed by its
     # workflow ID. Updated by the update_account_opening_state signal.
     account_opening_states: dict[str, str] = field(default_factory=dict)
-
-    def __post_init__(self):
-        if self.message_history is None:
-            self.message_history = []
 
 ### Handoff helpers
 
@@ -95,8 +90,8 @@ CONFIRMATION = re.compile(
 def is_unconfirmed_request(ctx: RunContext[AgentDependencies], verbs: tuple[str, ...]) -> bool:
     """Whether the customer's latest message asks for the action rather than confirming it.
 
-    Reads customer_message, not message_history: tools run as activities, where the
-    history arrives as plain dicts, and after a handoff it ends with the routing call.
+    Reads customer_message rather than the message history: tools run as activities and
+    don't see the history, and after a handoff it ends with the routing call.
     """
     message = ctx.deps.customer_message or ""
     return any(verb in message.lower() for verb in verbs) and not CONFIRMATION.match(message)
@@ -651,59 +646,6 @@ async def route_from_open_account_to_investment_agent(ctx: RunContext[AgentDepen
     except Exception as e:
         logger.error(f"Error in route_from_open_account_to_investment_agent: {e}")
         return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
-
-### Confirmation Validation Helper
-
-def check_for_confirmation_in_history(context: RunContext[AgentDependencies], action_type: str) -> bool:
-    """
-    Check if the user has provided confirmation in recent message history.
-
-    Args:
-        context: The run context with message history
-        action_type: Type of action ('delete' or 'close')
-
-    Returns:
-        True if confirmation found, False otherwise
-    """
-    # Look at the last few messages for confirmation keywords
-    confirmation_keywords = ['yes', 'confirm', 'sure', 'ok', 'proceed', 'go ahead', 'correct', 'affirmative']
-
-    # Get message history from deps (works in both Temporal and non-Temporal contexts)
-    message_history = context.deps.message_history
-
-    debug_print(f"Checking confirmation in history. Total messages: {len(message_history)}")
-
-    # Get recent messages (last 3 user messages)
-    recent_messages = []
-    for idx, msg in enumerate(reversed(message_history)):
-        debug_print(f"Message {idx}: type={type(msg).__name__}, has_parts={hasattr(msg, 'parts')}")
-        if hasattr(msg, 'parts'):
-            debug_print(f"  Parts count: {len(msg.parts)}")
-            for part_idx, part in enumerate(msg.parts):
-                debug_print(f"  Part {part_idx}: type={type(part).__name__}, has_content={hasattr(part, 'content')}, has_part_kind={hasattr(part, 'part_kind')}")
-                if hasattr(part, 'part_kind'):
-                    debug_print(f"    part_kind='{part.part_kind}'")
-                if hasattr(part, 'content') and isinstance(part.content, str):
-                    debug_print(f"    content='{part.content[:50]}'")
-                    # Check if this is a user message (not system/model)
-                    if part.part_kind == 'user-prompt':
-                        recent_messages.append(part.content.lower())
-                        debug_print(f"Found user message: '{part.content}'")
-                        if len(recent_messages) >= 3:
-                            break
-        if len(recent_messages) >= 3:
-            break
-
-    debug_print(f"Recent user messages: {recent_messages}")
-
-    # Check if any recent message contains confirmation
-    for msg in recent_messages:
-        if any(keyword in msg for keyword in confirmation_keywords):
-            debug_print(f"Found confirmation keyword in message: '{msg}'")
-            return True
-
-    debug_print("No confirmation found in recent messages")
-    return False
 
 ### Managers
 
