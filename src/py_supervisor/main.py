@@ -1,18 +1,24 @@
 import asyncio
 import logging
-import datetime
 
 from typing import List
 
 from pydantic_ai import Agent, ModelMessage
-from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from common.agent_constants import SUPERVISOR_AGENT_NAME, BENE_AGENT_NAME, INVEST_AGENT_NAME
+from common.agent_constants import (
+    BENE_AGENT_NAME,
+    INVEST_AGENT_NAME,
+    MAX_ROUTING_HOPS,
+    OPEN_ACCOUNT_AGENT_NAME,
+    ROUTING_FALLBACK_RESPONSE,
+    SUPERVISOR_AGENT_NAME,
+)
 from common.agents import (
     AgentDependencies,
     supervisor_agent,
     beneficiary_agent,
-    investment_agent
+    investment_agent,
+    open_account_agent,
 )
 
 ### Logging Configuration
@@ -54,24 +60,15 @@ class PydanticAIWealthManagement:
         """Process a user message through the agent system with routing."""
         debug_print(f"Processing user message: {user_input}")
 
-        # Add user message to history
-        user_message = ModelRequest(
-            parts=[UserPromptPart(
-                content=user_input,
-                timestamp=datetime.datetime.now(datetime.timezone.utc)
-            )]
-        )
-        self.message_history.append(user_message)
+        # Handoffs quote the customer's own words to the next agent
+        self.agent_deps.customer_message = user_input
 
-        # Start with supervisor agent
         current_agent = self._get_current_agent()
         current_input = user_input
+        hops = 0
 
         # Loop to handle chain routing
         while True:
-            # Sync message history to deps before running agent (for confirmation checking)
-            self.agent_deps.message_history = self.message_history
-
             # Run the current agent
             result = await current_agent.run(
                 current_input,
@@ -82,8 +79,19 @@ class PydanticAIWealthManagement:
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
 
+            if self.agent_deps.next_agent and hops >= MAX_ROUTING_HOPS:
+                # The agents keep routing to each other. Stop, and let the
+                # supervisor route the next message afresh.
+                logger.warning(f"Gave up after {hops} routes")
+                self.agent_deps.current_agent_name = SUPERVISOR_AGENT_NAME
+                self.agent_deps.next_agent = None
+                self.agent_deps.trigger_message = None
+                print(ROUTING_FALLBACK_RESPONSE)
+                break
+
             # Check if output function signaled a route
             if self.agent_deps.next_agent:
+                hops += 1
                 # Routing detected - switch to next agent
                 debug_print(f"\n>>> Routing: {self.agent_deps.current_agent_name} → {self.agent_deps.next_agent}")
 
@@ -109,6 +117,8 @@ class PydanticAIWealthManagement:
             return beneficiary_agent
         elif self.agent_deps.current_agent_name == INVEST_AGENT_NAME:
             return investment_agent
+        elif self.agent_deps.current_agent_name == OPEN_ACCOUNT_AGENT_NAME:
+            return open_account_agent
         else:
             return supervisor_agent
 

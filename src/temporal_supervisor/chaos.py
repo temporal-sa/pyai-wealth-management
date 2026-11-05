@@ -18,6 +18,10 @@ SLOW_SAGA_DELAY_SECONDS = 4
 
 
 async def is_enabled(flag: ChaosFlag) -> bool:
+    # The chaos panel only drives the Temporal version. The standalone version
+    # (py_supervisor) runs the same agents and tools outside any activity.
+    if not activity.in_activity():
+        return False
     # Fail open: if Redis is unreachable, chaos is off rather than breaking the demo.
     manager = ChaosManager()
     try:

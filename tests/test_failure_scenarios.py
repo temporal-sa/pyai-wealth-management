@@ -326,3 +326,117 @@ def test_client_id_tools_run_in_the_workflow():
 
     toolset = next(t for t in temporal_super_agent._toolsets if t.id == "<agent>")
     assert toolset.tool_activity_config == {"get_client_id": False, "set_client_id": False}
+
+
+async def test_reopening_after_a_rollback_debits_again(temporal_env, tmp_path):
+    # The parent reuses the child workflow ID when an account with the same name is
+    # opened again, so the transfer ID has to differ per run. Otherwise the ledger
+    # treats the second debit as a retry of the first and no money moves.
+    funding_file = tmp_path / "funding.json"
+    funding_file.write_text(json.dumps({"accounts": {CLIENT_ID: {"name": "Bank", "balance": 10_000.0}}}))
+
+    @activity.defn(name="debit_linked_account")
+    async def debit(client_id: str, amount: float, transfer_id: str) -> dict:
+        CALLS.append(f"debit:{amount}")
+        return FundingManager(funding_file).debit(client_id, amount, transfer_id)
+
+    @activity.defn(name="credit_linked_account")
+    async def credit(client_id: str, amount: float, transfer_id: str) -> dict:
+        CALLS.append(f"credit:{amount}")
+        return FundingManager(funding_file).credit(client_id, amount, transfer_id)
+
+    task_queue = f"{TASK_QUEUE}-reopen"
+    workflow_id = f"open-account-test-{uuid.uuid4()}"
+
+    async def open_once(failures: dict):
+        FAILURES.clear()
+        FAILURES.update(failures)
+        handle = await temporal_env.client.start_workflow(
+            OpenInvestmentAccountWorkflow.run,
+            OpenInvestmentAccountInput(client_id=CLIENT_ID, account_name="Test", initial_amount=500.0),
+            id=workflow_id,
+            task_queue=task_queue,
+        )
+        await handle.signal(OpenInvestmentAccountWorkflow.verify_kyc)
+        await handle.signal(OpenInvestmentAccountWorkflow.compliance_approved)
+        return await handle.result()
+
+    def balance() -> float:
+        return FundingManager(funding_file).get_account(CLIENT_ID)["balance"]
+
+    async with Worker(
+        temporal_env.client,
+        task_queue=task_queue,
+        workflows=[OpenInvestmentAccountWorkflow],
+        activities=[stub_get_client, stub_open_investment, stub_remove_investment, debit, credit, stub_register],
+    ):
+        first = await open_once({"register_account": "reject"})
+        assert not first.account_created
+        assert balance() == 10_000.0  # debited, then refunded
+
+        second = await open_once({})
+        assert second.account_created
+        assert balance() == 9_500.0
+
+
+# Status updates and conversation housekeeping for the supervisor workflow, without a model.
+SUPERVISOR_CALLS: list = []
+
+
+@activity.defn(name="get_task_queue_open_account")
+async def stub_get_task_queue_open_account() -> str:
+    return TASK_QUEUE
+
+
+@activity.defn(name="delete_conversation")
+async def stub_delete_conversation(workflow_id: str) -> bool:
+    SUPERVISOR_CALLS.append(f"delete_conversation:{workflow_id}")
+    return True
+
+
+@activity.defn(name="append_status_update")
+async def stub_append_status_update(workflow_id: str, status_update: Any) -> int:
+    SUPERVISOR_CALLS.append("append_status_update")
+    return len(SUPERVISOR_CALLS)
+
+
+@activity.defn(name="append_chat_interaction")
+async def stub_append_chat_interaction(workflow_id: str, chat_interaction: Any) -> int:
+    return 0
+
+
+async def test_supervisor_clears_the_old_conversation_and_records_status_updates(temporal_env):
+    from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+    from common.account_context import UpdateAccountOpeningStateInput
+
+    SUPERVISOR_CALLS.clear()
+    task_queue = f"{TASK_QUEUE}-supervisor-status"
+    workflow_id = f"supervisor-test-{uuid.uuid4()}"
+    async with Worker(
+        temporal_env.client,
+        task_queue=task_queue,
+        workflows=[WealthManagementWorkflow],
+        activities=[stub_get_task_queue_open_account, stub_delete_conversation,
+                    stub_append_status_update, stub_append_chat_interaction],
+        plugins=[PydanticAIPlugin()],
+    ):
+        # Started with no arguments, as the API does.
+        handle = await temporal_env.client.start_workflow(
+            WealthManagementWorkflow.run, id=workflow_id, task_queue=task_queue)
+        await handle.signal(WealthManagementWorkflow.update_account_opening_state,
+                            UpdateAccountOpeningStateInput(account_name="Vacation", state="Complete",
+                                                           workflow_id="OpenAccount-x-123-Vacation"))
+
+        # An ended account opening adds a note to the conversation.
+        for _ in range(50):
+            history = await handle.query(WealthManagementWorkflow.get_chat_history)
+            if history:
+                break
+            await asyncio.sleep(0.1)
+        assert any("Vacation account opening has ended" in str(part.content)
+                   for message in history for part in message.parts)
+        # The previous conversation with this workflow ID is deleted when it starts.
+        assert SUPERVISOR_CALLS[0] == f"delete_conversation:{workflow_id}"
+        assert SUPERVISOR_CALLS.count(f"delete_conversation:{workflow_id}") == 1
+        await handle.signal(WealthManagementWorkflow.end_workflow)
+        await handle.result()

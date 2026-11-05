@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 import re
 
@@ -31,7 +31,7 @@ from temporal_supervisor.retry_policies import TOOL_RETRY_POLICY, TOOL_START_TO_
 
 with workflow.unsafe.imports_passed_through():
     from temporal_supervisor.chaos import core_banking_api
-    from temporal_supervisor.model_config import ChaosAwareModel
+    from temporal_supervisor.model_config import ChaosAwareModel, agent_model as build_agent_model
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +59,15 @@ class AgentDependencies:
     next_agent: Optional[str] = None  # Signals routing to another agent
     trigger_message: Optional[str] = None  # Message for next agent
     current_agent_name: str = SUPERVISOR_AGENT_NAME  # For debugging/logging
-    message_history: list = None  # Message history for confirmation checking
     customer_message: Optional[str] = None  # The customer's latest chat message, word for word
     kyc_pending: bool = False  # KYC details shown to the customer and awaiting their confirmation
     pending_account_info: Optional[OpenInvestmentAccountInput] = None  # Account info being passed between agents
     task_queue_open_account: Optional[str] = None  # Task queue for opening account child workflows
     active_account_workflow_id: Optional[str] = None  # Workflow ID for active account opening process
     current_client_info: Optional['WealthManagementClient'] = None  # Original client info for KYC updates
-
-    def __post_init__(self):
-        if self.message_history is None:
-            self.message_history = []
+    # Latest state reported by each open-account child workflow, keyed by its
+    # workflow ID. Updated by the update_account_opening_state signal.
+    account_opening_states: dict[str, str] = field(default_factory=dict)
 
 ### Handoff helpers
 
@@ -87,6 +85,16 @@ CONFIRMATION = re.compile(
     r"^\s*(y|yes|yeah|yep|sure|ok|okay|correct|confirm(ed)?|approved?|that'?s (right|correct)|looks (good|right)|all good)\b",
     re.IGNORECASE,
 )
+
+
+def is_unconfirmed_request(ctx: RunContext[AgentDependencies], verbs: tuple[str, ...]) -> bool:
+    """Whether the customer's latest message asks for the action rather than confirming it.
+
+    Reads customer_message rather than the message history: tools run as activities and
+    don't see the history, and after a handoff it ends with the routing call.
+    """
+    message = ctx.deps.customer_message or ""
+    return any(verb in message.lower() for verb in verbs) and not CONFIRMATION.match(message)
 
 
 def kyc_tool_ran_this_turn(ctx: RunContext[AgentDependencies]) -> bool:
@@ -109,7 +117,8 @@ def kyc_tool_ran_this_turn(ctx: RunContext[AgentDependencies]) -> bool:
 async def respond_to_user(ctx: RunContext[AgentDependencies], response: str) -> str:
     """
     Respond directly to the user when no specialized agent is needed.
-    Use this for greetings, general questions, or when asking for client_id.
+    Use this for greetings, when asking for client_id, or to decline requests
+    that are not about beneficiaries or investment accounts.
 
     Args:
         response: Your response to the user
@@ -140,54 +149,68 @@ async def route_to_beneficiary_agent(ctx: RunContext[AgentDependencies], client_
         logger.error(f"Error in route_to_beneficiary_agent: {e}")
         return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
 
+async def _current_investments(client_id: str) -> list:
+    """The client's investment accounts, read fresh from the system.
+
+    Inside the Temporal workflow this has to be an activity (no file I/O in workflow
+    code); the standalone version (py_supervisor) reads them directly.
+    """
+    if workflow.in_workflow():
+        return await workflow.execute_activity(
+            Investments.list_investments,
+            args=[client_id],
+            start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
+            retry_policy=TOOL_RETRY_POLICY,
+        )
+    return InvestmentManager().list_investment_accounts(client_id)
+
+
+async def _hand_off_to_investment_agent(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+    """Route to the Investment Agent with the customer's message and their current accounts."""
+    if not client_id or client_id.strip() == "":
+        raise ValueError("client_id is required for routing to investment agent")
+
+    debug_print(f"[{ctx.deps.current_agent_name}] Routing to {INVEST_AGENT_NAME}")
+
+    ctx.deps.client_id = client_id
+    ctx.deps.next_agent = INVEST_AGENT_NAME
+
+    # ALWAYS fetch fresh investment data to ensure agent has current information
+    # This prevents stale data issues regardless of routing path
+    logger.info(f"Fetching fresh investment data for client {client_id}")
+    investments_list = await _current_investments(client_id)
+
+    # Format the data for the agent
+    if investments_list:
+        formatted_data = "CURRENT INVESTMENT ACCOUNTS (fetched fresh from database):\n"
+        for inv in investments_list:
+            formatted_data += f"- {inv['name']}: ${inv['balance']:.2f} (ID: {inv['investment_id']})\n"
+
+        investment_data = f"Here is the current investment data for client {client_id}:\n\n{formatted_data}"
+    else:
+        investment_data = f"Client {client_id} has NO investment accounts in the system."
+    ctx.deps.trigger_message = (
+        f"{customer_said(ctx)}\n\n{investment_data}\n"
+        "Handle the customer's latest message. If it asks to open a new account with a name and an amount, "
+        "route it to the Open Account Agent instead of listing the accounts."
+    )
+
+    return ""  # Empty response - routing happens in main loop
+
+
 async def route_to_investment_agent(ctx: RunContext[AgentDependencies], client_id: str) -> str:
     """
     Route to the investment agent for investment-related requests.
     This function signals the handoff - the main loop will execute it.
 
-    IMPORTANT: This function ALWAYS fetches fresh investment data via activity
+    IMPORTANT: This function ALWAYS fetches fresh investment data
     to ensure the agent has current information, regardless of request type or routing path.
 
     Args:
         client_id: The client's ID (must be provided)
     """
     try:
-        if not client_id or client_id.strip() == "":
-            raise ValueError("client_id is required for routing to investment agent")
-
-        debug_print(f"[{ctx.deps.current_agent_name}] Routing to {INVEST_AGENT_NAME}")
-
-        ctx.deps.client_id = client_id
-        ctx.deps.next_agent = INVEST_AGENT_NAME
-
-        # ALWAYS fetch fresh investment data to ensure agent has current information
-        # This prevents stale data issues regardless of routing path
-        logger.info(f"Fetching fresh investment data for client {client_id}")
-
-        # Call the activity to fetch fresh data (cannot do file I/O in workflow context)
-        investments_list = await workflow.execute_activity(
-            Investments.list_investments,
-            args=[client_id],
-            start_to_close_timeout=TOOL_START_TO_CLOSE_TIMEOUT,
-            retry_policy=TOOL_RETRY_POLICY,
-        )
-
-        # Format the data for the agent
-        if investments_list:
-            formatted_data = "CURRENT INVESTMENT ACCOUNTS (fetched fresh from database):\n"
-            for inv in investments_list:
-                formatted_data += f"- {inv['name']}: ${inv['balance']:.2f} (ID: {inv['investment_id']})\n"
-
-            investment_data = f"Here is the current investment data for client {client_id}:\n\n{formatted_data}"
-        else:
-            investment_data = f"Client {client_id} has NO investment accounts in the system."
-        ctx.deps.trigger_message = (
-            f"{customer_said(ctx)}\n\n{investment_data}\n"
-            "Handle the customer's latest message. If it asks to open a new account with a name and an amount, "
-            "route it to the Open Account Agent instead of listing the accounts."
-        )
-
-        return ""  # Empty response - routing happens in main loop
+        return await _hand_off_to_investment_agent(ctx, client_id)
     except Exception as e:
         logger.error(f"Error in route_to_investment_agent: {e}")
         return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
@@ -262,7 +285,9 @@ async def route_from_beneficiary_to_supervisor(ctx: RunContext[AgentDependencies
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
+        ctx.deps.trigger_message = (
+            f"{customer_said(ctx)}\n\nRoute it to the appropriate agent, or decline it if it is not about "
+            "beneficiaries or investment accounts.")
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -344,7 +369,9 @@ async def route_from_investment_to_supervisor(ctx: RunContext[AgentDependencies]
 
         ctx.deps.client_id = client_id
         ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
+        ctx.deps.trigger_message = (
+            f"{customer_said(ctx)}\n\nRoute it to the appropriate agent, or decline it if it is not about "
+            "beneficiaries or investment accounts.")
 
         return ""  # Empty response - routing happens in main loop
     except Exception as e:
@@ -377,8 +404,18 @@ async def route_from_investment_to_open_account(ctx: RunContext[AgentDependencie
 
         debug_print(f"[{ctx.deps.current_agent_name}] Routing to {OPEN_ACCOUNT_AGENT_NAME} with account info: {cleaned_account_info}")
 
-        # Store the cleaned account info so the Open Account Agent can access it
         ctx.deps.client_id = client_id
+
+        if not workflow.in_workflow():
+            # Standalone version (py_supervisor): no account opening workflow, so the
+            # account is simply added, like the open_investment tool of the OpenAI
+            # Agents SDK standalone version.
+            InvestmentManager().add_investment_account(
+                InvestmentAccount(client_id, cleaned_name, account_info.initial_amount))
+            return (f"Your {cleaned_name} account has been opened with "
+                    f"${account_info.initial_amount:,.2f}.")
+
+        # Store the cleaned account info so the Open Account Agent can access it
         ctx.deps.pending_account_info = cleaned_account_info
         ctx.deps.next_agent = OPEN_ACCOUNT_AGENT_NAME
         ctx.deps.trigger_message = f"The user wants to open a new account: {cleaned_name} with ${account_info.initial_amount}"
@@ -420,12 +457,12 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
         if keyword in response_lower:
             workflow.logger.warning(
                 f"⚠️ VALIDATION FAILED: respond_about_account_opening called with forbidden keyword '{keyword}'. "
-                f"Agent should use route_from_open_account_to_supervisor instead!"
+                f"Agent should use route_from_open_account_to_investment_agent instead!"
             )
             raise ModelRetry(
                 "respond_about_account_opening is ONLY for KYC approval/update responses. "
                 "For requests about listing accounts, viewing investments, or other operations, "
-                "you MUST use route_from_open_account_to_supervisor(client_id) instead."
+                "you MUST use route_from_open_account_to_investment_agent(client_id) instead."
             )
 
     # A customer confirming their KYC details must reach the workflow. Telling them it's
@@ -594,83 +631,21 @@ async def update_client_details(workflow_id: str, client_details: WealthManageme
     return result
 
 
-async def route_from_open_account_to_supervisor(ctx: RunContext[AgentDependencies], client_id: str) -> str:
+async def route_from_open_account_to_investment_agent(ctx: RunContext[AgentDependencies], client_id: str) -> str:
     """
-    Route back to supervisor when the request is not related to opening investments,
-    or checking the status of a newly opened investment account.
-    Use this immediately if the user asks about beneficiaries or other topics.
+    Hand back to the Investment Agent when the request is not about this account opening,
+    or once the account opening has finished.
+    Use this immediately if the user asks about their investments, beneficiaries or other topics.
 
     Args:
         ctx: The run context with dependencies
         client_id: The client's ID
     """
     try:
-        if not client_id or client_id.strip() == "":
-            raise ValueError("client_id is required for routing")
-
-        debug_print(f"[{ctx.deps.current_agent_name}] Routing back to {SUPERVISOR_AGENT_NAME}")
-
-        ctx.deps.client_id = client_id
-        ctx.deps.next_agent = SUPERVISOR_AGENT_NAME
-        ctx.deps.trigger_message = f"{customer_said(ctx)}\n\nRoute it to the appropriate agent."
-
-        return ""  # Empty response - routing happens in main loop
+        return await _hand_off_to_investment_agent(ctx, client_id)
     except Exception as e:
-        logger.error(f"Error in route_from_open_account_to_supervisor: {e}")
+        logger.error(f"Error in route_from_open_account_to_investment_agent: {e}")
         return f"I encountered a problem with the system. Please try again. (Debug: {str(e)})"
-
-### Confirmation Validation Helper
-
-def check_for_confirmation_in_history(context: RunContext[AgentDependencies], action_type: str) -> bool:
-    """
-    Check if the user has provided confirmation in recent message history.
-
-    Args:
-        context: The run context with message history
-        action_type: Type of action ('delete' or 'close')
-
-    Returns:
-        True if confirmation found, False otherwise
-    """
-    # Look at the last few messages for confirmation keywords
-    confirmation_keywords = ['yes', 'confirm', 'sure', 'ok', 'proceed', 'go ahead', 'correct', 'affirmative']
-
-    # Get message history from deps (works in both Temporal and non-Temporal contexts)
-    message_history = context.deps.message_history
-
-    debug_print(f"Checking confirmation in history. Total messages: {len(message_history)}")
-
-    # Get recent messages (last 3 user messages)
-    recent_messages = []
-    for idx, msg in enumerate(reversed(message_history)):
-        debug_print(f"Message {idx}: type={type(msg).__name__}, has_parts={hasattr(msg, 'parts')}")
-        if hasattr(msg, 'parts'):
-            debug_print(f"  Parts count: {len(msg.parts)}")
-            for part_idx, part in enumerate(msg.parts):
-                debug_print(f"  Part {part_idx}: type={type(part).__name__}, has_content={hasattr(part, 'content')}, has_part_kind={hasattr(part, 'part_kind')}")
-                if hasattr(part, 'part_kind'):
-                    debug_print(f"    part_kind='{part.part_kind}'")
-                if hasattr(part, 'content') and isinstance(part.content, str):
-                    debug_print(f"    content='{part.content[:50]}'")
-                    # Check if this is a user message (not system/model)
-                    if part.part_kind == 'user-prompt':
-                        recent_messages.append(part.content.lower())
-                        debug_print(f"Found user message: '{part.content}'")
-                        if len(recent_messages) >= 3:
-                            break
-        if len(recent_messages) >= 3:
-            break
-
-    debug_print(f"Recent user messages: {recent_messages}")
-
-    # Check if any recent message contains confirmation
-    for msg in recent_messages:
-        if any(keyword in msg for keyword in confirmation_keywords):
-            debug_print(f"Found confirmation keyword in message: '{msg}'")
-            return True
-
-    debug_print("No confirmation found in recent messages")
-    return False
 
 ### Managers
 
@@ -681,7 +656,7 @@ beneficiaries_mgr = BeneficiariesManager()
 ### Agents
 
 # Honors the LLM chaos flags and turns OpenAI 429s into a Retry-After style delay.
-agent_model = ChaosAwareModel(AGENT_MODEL)
+agent_model = ChaosAwareModel(build_agent_model(AGENT_MODEL))
 
 supervisor_agent = Agent(
     agent_model,
@@ -724,7 +699,7 @@ open_account_agent = Agent(
     deps_type=AgentDependencies,
     output_type=[
         respond_about_account_opening,
-        route_from_open_account_to_supervisor,
+        route_from_open_account_to_investment_agent,
     ],
     instructions=OPEN_ACCOUNT_INSTRUCTIONS,
     end_strategy='exhaustive',
@@ -821,32 +796,17 @@ async def delete_beneficiaries(
                 "Do NOT call this tool again until the user has confirmed."
             )
 
-        # Double-check: Validate that the most recent user message is actually a confirmation
-        # and not the initial "remove X" request
-        message_history = context.deps.message_history
-        if message_history:
-            # Get the most recent message
-            for msg in reversed(message_history):
-                if hasattr(msg, 'parts'):
-                    for part in msg.parts:
-                        if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
-                            if hasattr(part, 'content') and isinstance(part.content, str):
-                                last_user_msg = part.content.lower()
-
-                                # Check if this looks like a "remove X" command rather than a confirmation
-                                if 'remove' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
-                                    raise ModelRetry(
-                                        "CRITICAL ERROR: The user's last message was a remove REQUEST, not a confirmation. "
-                                        f"Last message: '{part.content}'\n\n"
-                                        "This is Step 1, not Step 2! You MUST:\n"
-                                        "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
-                                        "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
-                                        "3. ONLY THEN call this tool with user_confirmed=True\n\n"
-                                        "Do NOT call this tool until the user explicitly confirms!"
-                                    )
-                                break
-                        break
-                    break
+        # The model sometimes passes user_confirmed=True on the request itself
+        if is_unconfirmed_request(context, ("remove", "delete")):
+            raise ModelRetry(
+                "CRITICAL ERROR: The customer's latest message was a remove REQUEST, not a confirmation. "
+                f"Their message: '{context.deps.customer_message}'\n\n"
+                "This is Step 1, not Step 2! You MUST:\n"
+                "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+                "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+                "Do NOT call this tool until the user explicitly confirms!"
+            )
 
         # Look up the beneficiary by name to get the ID
         await core_banking_api()
@@ -885,31 +845,17 @@ async def list_investments(
     Returns:
         list: Current investment accounts for the client
     """
-    # Check message history to see if this is actually an open request
-    if context.deps.message_history:
-        # Get the most recent user message
-        for msg in reversed(context.deps.message_history):
-            if hasattr(msg, 'parts'):
-                for part in msg.parts:
-                    if hasattr(part, 'content') and isinstance(part.content, str):
-                        content_lower = part.content.lower()
-                        # Check if this is an open request with details
-                        if 'open' in content_lower:
-                            # Look for account name and amount patterns
-                            import re
-                            # Pattern: "open [word] with $[number]" or similar
-                            has_amount = bool(re.search(r'\$\s*\d+|\d+\s*dollars?', content_lower))
-                            # If they said "open" and there's a dollar amount, they should be routed not listed
-                            if has_amount:
-                                raise ModelRetry(
-                                    "ERROR: You called list_investments, but the user asked to OPEN an account with specific details! "
-                                    "The user's request contains 'open' and a dollar amount. "
-                                    "You should NOT list accounts - instead, extract the account name and amount, then call "
-                                    "route_from_investment_to_open_account(client_id, account_info) immediately. "
-                                    "Re-read the user's request and route to Open Account Agent!"
-                                )
-                        break
-                break
+    # An open request with an amount should be routed to the Open Account Agent, not listed.
+    # Reads customer_message for the reasons given in is_unconfirmed_request.
+    message = (context.deps.customer_message or "").lower()
+    if 'open' in message and re.search(r'\$\s*\d+|\d+\s*dollars?', message):
+        raise ModelRetry(
+            "ERROR: You called list_investments, but the user asked to OPEN an account with specific details! "
+            "The user's request contains 'open' and a dollar amount. "
+            "You should NOT list accounts - instead, extract the account name and amount, then call "
+            "route_from_investment_to_open_account(client_id, account_info) immediately. "
+            "Re-read the user's request and route to Open Account Agent!"
+        )
 
     await core_banking_api()
     return InvestmentManager().list_investment_accounts(context.deps.client_id)
@@ -960,32 +906,17 @@ async def close_investment(context: RunContext[AgentDependencies],
             "Do NOT call this tool again until the user has confirmed."
         )
 
-    # Double-check: Validate that the most recent user message is actually a confirmation
-    # and not the initial "close X" request
-    message_history = context.deps.message_history
-    if message_history:
-        # Get the most recent message
-        for msg in reversed(message_history):
-            if hasattr(msg, 'parts'):
-                for part in msg.parts:
-                    if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
-                        if hasattr(part, 'content') and isinstance(part.content, str):
-                            last_user_msg = part.content.lower()
-
-                            # Check if this looks like a "close X" command rather than a confirmation
-                            if 'close' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
-                                raise ModelRetry(
-                                    "CRITICAL ERROR: The user's last message was a close REQUEST, not a confirmation. "
-                                    f"Last message: '{part.content}'\n\n"
-                                    "This is Step 1, not Step 2! You MUST:\n"
-                                    "1. First ASK: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
-                                    "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
-                                    "3. ONLY THEN call this tool with user_confirmed=True\n\n"
-                                    "Do NOT call this tool until the user explicitly confirms!"
-                                )
-                            break
-                    break
-                break
+    # The model sometimes passes user_confirmed=True on the request itself
+    if is_unconfirmed_request(context, ("close",)):
+        raise ModelRetry(
+            "CRITICAL ERROR: The customer's latest message was a close REQUEST, not a confirmation. "
+            f"Their message: '{context.deps.customer_message}'\n\n"
+            "This is Step 1, not Step 2! You MUST:\n"
+            "1. First ASK: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
+            "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+            "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+            "Do NOT call this tool until the user explicitly confirms!"
+        )
 
     await core_banking_api()
     return InvestmentManager().delete_investment_account(
@@ -1034,6 +965,26 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
         # Raised rather than returned: the caller uses the result as a workflow ID.
         logger.error(f"Error starting account opening workflow: {e}")
         raise
+
+@open_account_agent.tool
+async def get_account_opening_status(ctx: RunContext[AgentDependencies], workflow_id: str = "") -> str:
+    """Get the current status of an account opening.
+
+    Args:
+        workflow_id: The workflow ID shown when the account opening was started.
+            Leave empty for the current account opening.
+
+    Returns:
+        The latest status the account opening reported. "Complete" means the account
+        was opened; a status starting with "Rolled back" means it was not opened.
+        Either way, that account opening is finished.
+    """
+    workflow_id = workflow_id.strip() or ctx.deps.active_account_workflow_id or ""
+    state = ctx.deps.account_opening_states.get(workflow_id)
+    if state is None:
+        return f"No account opening with workflow ID {workflow_id} was found in this conversation."
+    return state
+
 
 @open_account_agent.tool
 async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:

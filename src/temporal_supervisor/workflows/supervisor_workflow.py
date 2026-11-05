@@ -24,7 +24,14 @@ from common.agents import (
     open_account_agent,
 )
 
-from common.agent_constants import BENE_AGENT_NAME, INVEST_AGENT_NAME, OPEN_ACCOUNT_AGENT_NAME, SUPERVISOR_AGENT_NAME
+from common.agent_constants import (
+    BENE_AGENT_NAME,
+    INVEST_AGENT_NAME,
+    MAX_ROUTING_HOPS,
+    OPEN_ACCOUNT_AGENT_NAME,
+    ROUTING_FALLBACK_RESPONSE,
+    SUPERVISOR_AGENT_NAME,
+)
 from common.user_message import ProcessUserMessageInput, ChatInteraction
 from common.account_context import UpdateAccountOpeningStateInput
 from common.status_update import StatusUpdate
@@ -65,7 +72,8 @@ def _temporal_agent(agent: Agent, workflow_tools: tuple = ()) -> TemporalAgent:
 temporal_super_agent = _temporal_agent(supervisor_agent, workflow_tools=("get_client_id", "set_client_id"))
 temporal_bene_agent = _temporal_agent(beneficiary_agent)
 temporal_invest_agent = _temporal_agent(investment_agent)
-temporal_open_account_agent = _temporal_agent(open_account_agent)
+temporal_open_account_agent = _temporal_agent(open_account_agent, workflow_tools=("get_account_opening_status",))
+
 
 @workflow.defn
 class WealthManagementWorkflow(PydanticAIWorkflow):
@@ -85,6 +93,16 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
     @workflow.run
     async def run(self):
+        # A new conversation: delete any previous one with this workflow ID, which
+        # the demo reuses.
+        workflow.logger.info(f"Deleting any previous conversation {self.wf_id}")
+        await workflow.execute_local_activity(
+            EventStreamActivities.delete_conversation,
+            args=[self.wf_id],
+            schedule_to_close_timeout=self.sched_to_close_timeout,
+            retry_policy=self.retry_policy,
+        )
+
         # Get task queue configuration via local activity (runs outside sandbox)
         task_queue = await workflow.execute_local_activity(
             LocalActivities.get_task_queue_open_account,
@@ -118,7 +136,23 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
                 await self._process_status_update(status_message)
                 workflow.logger.info("status update processed.")
 
-           # TODO: Implement Continue as New
+            # TODO: Continue-As-New.
+            # This demo keeps the whole conversation in one workflow run. A production system
+            # would call continue-as-new when workflow.info().is_continue_as_new_suggested()
+            # returns true, because Temporal limits a run's event history (warnings at 10K
+            # events / 10 MB, terminated at 50K events / 50 MB) and every LLM call and tool
+            # call adds events, so a long-running chat would eventually hit those limits.
+            # To do it safely:
+            #   - Wait for workflow.all_handlers_finished() and drain the pending message and
+            #     status queues first, so no customer message or status update is lost.
+            #   - Carry the conversation state into the new run: the message history, the
+            #     active agent, the client ID, the account-opening states, and the KYC
+            #     guard's turn tracking.
+            #   - Open-account child workflows are started with ParentClosePolicy.TERMINATE,
+            #     which also applies when the parent continues-as-new, so an opening waiting
+            #     for KYC or compliance would be terminated. Use ParentClosePolicy.ABANDON and
+            #     have the end_workflow handler cancel/terminate any openings still running,
+            #     or defer continue-as-new until no opening is in progress.
 
     @workflow.query
     def get_chat_history(self) -> list[ModelMessage]:
@@ -136,6 +170,8 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
     @workflow.signal
     async def update_account_opening_state(self, state_input: UpdateAccountOpeningStateInput):
         workflow.logger.info(f"Account Opening State changed {state_input.account_name} {state_input.state}")
+        if state_input.workflow_id is not None:
+            self.agent_deps.account_opening_states[state_input.workflow_id] = state_input.state
         await self.pending_status_updates.put(state_input)
 
     async def _process_chat_message(self, message: str):
@@ -186,14 +222,18 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         )]))
 
         active = self.agent_deps.active_account_workflow_id
-        if active and active.endswith(f"-{state_input.account_name}"):
+        if state_input.workflow_id is not None:
+            is_active = active == state_input.workflow_id
+        else:
+            is_active = bool(active) and active.endswith(f"-{state_input.account_name}")
+        if is_active:
             self.agent_deps.active_account_workflow_id = None
             self.agent_deps.current_client_info = None
             self.agent_deps.kyc_pending = False
-            # Nothing is left for the Open Account Agent to do, so the next
-            # message goes to the supervisor to be routed.
+            # Nothing is left for the Open Account Agent to do, so it hands back to
+            # the Investment Agent, as it does when the customer asks about anything else.
             if self.agent_deps.current_agent_name == OPEN_ACCOUNT_AGENT_NAME:
-                self.agent_deps.current_agent_name = SUPERVISOR_AGENT_NAME
+                self.agent_deps.current_agent_name = INVEST_AGENT_NAME
 
     async def _process_user_message(self, chat_interaction: ChatInteraction, user_input: str):
         workflow.logger.info(f"Processing user message of {user_input}")
@@ -201,25 +241,13 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         # Handoffs quote the customer's own words to the next agent
         self.agent_deps.customer_message = user_input
 
-        # The first agent run adds the user input to the history, so it is only
-        # added to the copy the tools see until then.
-        unrecorded = [ModelRequest(
-            parts=[UserPromptPart(
-                content=user_input,
-                timestamp=workflow.now()
-            )]
-        )]
-
         current_agent = self._get_current_agent()
         current_input = user_input
 
         response = ""
+        hops = 0
         # Loop to handle chain routing
         while True:
-            # Sync message history to deps BEFORE running agent, including the user input
-            # (so tools can access confirmation messages in context.deps.message_history)
-            self.agent_deps.message_history = self.message_history + unrecorded
-
             workflow.logger.info(f"Running the current agent of {current_agent} with {current_input}")
 
             # Run the current agent
@@ -231,10 +259,22 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
             # Add agent's new messages to history
             self.message_history.extend(result.new_messages())
-            unrecorded = []
 
             # Check if output function signaled a route
+            if self.agent_deps.next_agent and hops >= MAX_ROUTING_HOPS:
+                # The agents keep routing to each other. Stop, and let the
+                # supervisor route the customer's next message afresh.
+                workflow.logger.warning(
+                    f"Gave up after {hops} routes; last was {self.agent_deps.current_agent_name} "
+                    f"→ {self.agent_deps.next_agent}")
+                self.agent_deps.current_agent_name = SUPERVISOR_AGENT_NAME
+                self.agent_deps.next_agent = None
+                self.agent_deps.trigger_message = None
+                response = ROUTING_FALLBACK_RESPONSE
+                break
+
             if self.agent_deps.next_agent:
+                hops += 1
                 # Routing detected - switch to next agent
                 workflow.logger.info(f"\n>>> Routing: {self.agent_deps.current_agent_name} → {self.agent_deps.next_agent}")
 

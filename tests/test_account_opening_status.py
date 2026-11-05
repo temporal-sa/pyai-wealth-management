@@ -4,6 +4,8 @@ _end_account_opening only touches workflow state, so it is called on a stand-in
 for the workflow rather than a running one.
 """
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -21,9 +23,16 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from temporalio import workflow
 
 from common.account_context import UpdateAccountOpeningStateInput
-from common.agent_constants import OPEN_ACCOUNT_AGENT_NAME, SUPERVISOR_AGENT_NAME
-from common.agents import AgentDependencies
-from temporal_supervisor.workflows.supervisor_workflow import ACCOUNT_OPENING_ENDED, WealthManagementWorkflow
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
+
+from common.agent_constants import INVEST_AGENT_NAME, OPEN_ACCOUNT_AGENT_NAME
+from common.agents import AgentDependencies, get_account_opening_status
+from temporal_supervisor.workflows.supervisor_workflow import (
+    ACCOUNT_OPENING_ENDED,
+    WealthManagementWorkflow,
+)
 
 ROLLED_BACK = "Rolled back. The account was not opened: Custodian rejected the account."
 
@@ -43,9 +52,9 @@ def _session(account_name="Vacation"):
     return SimpleNamespace(agent_deps=deps, message_history=[])
 
 
-def _end(session, account_name, state):
+def _end(session, account_name, state, workflow_id=None):
     WealthManagementWorkflow._end_account_opening(
-        session, UpdateAccountOpeningStateInput(account_name=account_name, state=state))
+        session, UpdateAccountOpeningStateInput(account_name=account_name, state=state, workflow_id=workflow_id))
 
 
 def test_both_end_states_are_recognised():
@@ -86,14 +95,24 @@ async def test_the_history_stays_valid_for_openai_after_several_updates():
     assert roles.index("tool") == roles.index("assistant") + 1, roles
 
 
-def test_the_supervisor_takes_over_once_the_account_opening_ends():
+def test_the_investment_agent_takes_over_once_the_account_opening_ends():
     session = _session()
     _end(session, "Vacation", ROLLED_BACK)
 
     deps = session.agent_deps
     assert deps.active_account_workflow_id is None
     assert not deps.kyc_pending
-    assert deps.current_agent_name == SUPERVISOR_AGENT_NAME
+    assert deps.current_agent_name == INVEST_AGENT_NAME
+
+
+def test_the_workflow_id_identifies_the_account_opening_that_ended():
+    session = _session("Vacation")
+    # Same account name, but a different account opening.
+    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-other-session-123-Vacation")
+    assert session.agent_deps.active_account_workflow_id == "OpenAccount-session-123-Vacation"
+
+    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-session-123-Vacation")
+    assert session.agent_deps.active_account_workflow_id is None
 
 
 def test_another_accounts_opening_is_left_alone():
@@ -104,3 +123,39 @@ def test_another_accounts_opening_is_left_alone():
     assert deps.active_account_workflow_id == "OpenAccount-session-123-Boat"
     assert deps.kyc_pending
     assert deps.current_agent_name == OPEN_ACCOUNT_AGENT_NAME
+
+
+async def test_the_state_signal_is_kept_for_the_status_tool(monkeypatch):
+    monkeypatch.setattr(workflow, "logger", logging.getLogger(__name__))
+    session = SimpleNamespace(agent_deps=AgentDependencies(), pending_status_updates=asyncio.Queue())
+    update = UpdateAccountOpeningStateInput(
+        account_name="Vacation", state="Waiting Compliance Review", workflow_id="OpenAccount-1")
+    await WealthManagementWorkflow.update_account_opening_state(session, update)
+
+    assert session.agent_deps.account_opening_states == {"OpenAccount-1": "Waiting Compliance Review"}
+    assert session.pending_status_updates.get_nowait() == update
+
+
+def _tool_ctx(deps: AgentDependencies) -> RunContext[AgentDependencies]:
+    return RunContext(deps=deps, model=TestModel(), usage=RunUsage())
+
+
+async def test_get_account_opening_status():
+    deps = AgentDependencies(
+        account_opening_states={"OpenAccount-1": "Waiting KYC", "OpenAccount-2": ROLLED_BACK},
+        active_account_workflow_id="OpenAccount-1",
+    )
+    ctx = _tool_ctx(deps)
+    assert await get_account_opening_status(ctx, "OpenAccount-2") == ROLLED_BACK
+    # No ID: the current account opening.
+    assert await get_account_opening_status(ctx) == "Waiting KYC"
+    assert await get_account_opening_status(ctx, "OpenAccount-9") == (
+        "No account opening with workflow ID OpenAccount-9 was found in this conversation.")
+
+
+def test_the_status_tool_runs_in_the_workflow():
+    # It reads deps that only the workflow keeps up to date.
+    from temporal_supervisor.workflows.supervisor_workflow import temporal_open_account_agent
+
+    toolset = next(t for t in temporal_open_account_agent._toolsets if t.id == "<agent>")
+    assert toolset.tool_activity_config == {"get_account_opening_status": False}
