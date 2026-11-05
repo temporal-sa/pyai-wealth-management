@@ -92,6 +92,16 @@ CONFIRMATION = re.compile(
 )
 
 
+def is_unconfirmed_request(ctx: RunContext[AgentDependencies], verbs: tuple[str, ...]) -> bool:
+    """Whether the customer's latest message asks for the action rather than confirming it.
+
+    Reads customer_message, not message_history: tools run as activities, where the
+    history arrives as plain dicts, and after a handoff it ends with the routing call.
+    """
+    message = ctx.deps.customer_message or ""
+    return any(verb in message.lower() for verb in verbs) and not CONFIRMATION.match(message)
+
+
 def kyc_tool_ran_this_turn(ctx: RunContext[AgentDependencies]) -> bool:
     """Whether approve_client_kyc or update_kyc_details was called since this agent run's prompt.
 
@@ -844,32 +854,17 @@ async def delete_beneficiaries(
                 "Do NOT call this tool again until the user has confirmed."
             )
 
-        # Double-check: Validate that the most recent user message is actually a confirmation
-        # and not the initial "remove X" request
-        message_history = context.deps.message_history
-        if message_history:
-            # Get the most recent message
-            for msg in reversed(message_history):
-                if hasattr(msg, 'parts'):
-                    for part in msg.parts:
-                        if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
-                            if hasattr(part, 'content') and isinstance(part.content, str):
-                                last_user_msg = part.content.lower()
-
-                                # Check if this looks like a "remove X" command rather than a confirmation
-                                if 'remove' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
-                                    raise ModelRetry(
-                                        "CRITICAL ERROR: The user's last message was a remove REQUEST, not a confirmation. "
-                                        f"Last message: '{part.content}'\n\n"
-                                        "This is Step 1, not Step 2! You MUST:\n"
-                                        "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
-                                        "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
-                                        "3. ONLY THEN call this tool with user_confirmed=True\n\n"
-                                        "Do NOT call this tool until the user explicitly confirms!"
-                                    )
-                                break
-                        break
-                    break
+        # The model sometimes passes user_confirmed=True on the request itself
+        if is_unconfirmed_request(context, ("remove", "delete")):
+            raise ModelRetry(
+                "CRITICAL ERROR: The customer's latest message was a remove REQUEST, not a confirmation. "
+                f"Their message: '{context.deps.customer_message}'\n\n"
+                "This is Step 1, not Step 2! You MUST:\n"
+                "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+                "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+                "Do NOT call this tool until the user explicitly confirms!"
+            )
 
         # Look up the beneficiary by name to get the ID
         await core_banking_api()
@@ -983,32 +978,17 @@ async def close_investment(context: RunContext[AgentDependencies],
             "Do NOT call this tool again until the user has confirmed."
         )
 
-    # Double-check: Validate that the most recent user message is actually a confirmation
-    # and not the initial "close X" request
-    message_history = context.deps.message_history
-    if message_history:
-        # Get the most recent message
-        for msg in reversed(message_history):
-            if hasattr(msg, 'parts'):
-                for part in msg.parts:
-                    if hasattr(part, 'part_kind') and part.part_kind == 'user-prompt':
-                        if hasattr(part, 'content') and isinstance(part.content, str):
-                            last_user_msg = part.content.lower()
-
-                            # Check if this looks like a "close X" command rather than a confirmation
-                            if 'close' in last_user_msg and not any(kw in last_user_msg for kw in ['yes', 'confirm', 'sure', 'ok', 'proceed']):
-                                raise ModelRetry(
-                                    "CRITICAL ERROR: The user's last message was a close REQUEST, not a confirmation. "
-                                    f"Last message: '{part.content}'\n\n"
-                                    "This is Step 1, not Step 2! You MUST:\n"
-                                    "1. First ASK: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
-                                    "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
-                                    "3. ONLY THEN call this tool with user_confirmed=True\n\n"
-                                    "Do NOT call this tool until the user explicitly confirms!"
-                                )
-                            break
-                    break
-                break
+    # The model sometimes passes user_confirmed=True on the request itself
+    if is_unconfirmed_request(context, ("close",)):
+        raise ModelRetry(
+            "CRITICAL ERROR: The customer's latest message was a close REQUEST, not a confirmation. "
+            f"Their message: '{context.deps.customer_message}'\n\n"
+            "This is Step 1, not Step 2! You MUST:\n"
+            "1. First ASK: 'Are you sure you want to close [Account Name]? Please confirm.'\n"
+            "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
+            "3. ONLY THEN call this tool with user_confirmed=True\n\n"
+            "Do NOT call this tool until the user explicitly confirms!"
+        )
 
     await core_banking_api()
     return InvestmentManager().delete_investment_account(
