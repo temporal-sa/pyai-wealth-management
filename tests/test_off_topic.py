@@ -17,6 +17,7 @@ from common.agent_constants import (
     INVEST_INSTRUCTIONS,
     OFF_TOPIC_INSTRUCTIONS,
     OPEN_ACCOUNT_INSTRUCTIONS,
+    RECOMMENDED_PROMPT_PREFIX,
     SUPERVISOR_AGENT_NAME,
     SUPERVISOR_INSTRUCTIONS,
 )
@@ -36,6 +37,13 @@ def test_the_supervisor_declines_anything_else():
     assert DECLINE_BLOCK in SUPERVISOR_INSTRUCTIONS
     # Right after the supervisor's opening line, before the routing rules.
     assert SUPERVISOR_INSTRUCTIONS.index(DECLINE_BLOCK) < SUPERVISOR_INSTRUCTIONS.index("## Your Output Functions")
+
+
+def test_every_agent_starts_with_the_recommended_prompt_prefix():
+    for instructions in (SUPERVISOR_INSTRUCTIONS, BENE_INSTRUCTIONS, INVEST_INSTRUCTIONS, OPEN_ACCOUNT_INSTRUCTIONS):
+        assert instructions.startswith(RECOMMENDED_PROMPT_PREFIX)
+    # The prefix comes before the supervisor's decline block, which is unchanged.
+    assert SUPERVISOR_INSTRUCTIONS.index(RECOMMENDED_PROMPT_PREFIX) < SUPERVISOR_INSTRUCTIONS.index(DECLINE_BLOCK)
 
 
 def test_the_specialists_hand_anything_else_back():

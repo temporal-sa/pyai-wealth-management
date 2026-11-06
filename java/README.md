@@ -51,8 +51,7 @@ cd java
 
 The task queue name is passed in as `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT`. The Python worker's task queue
 defaults to `PY-AI-Supervisor`; if you changed it with `TEMPORAL_TASK_QUEUE`, set the same value before
-starting the Java worker. `startlocalworker.sh` sources `../setclaimcheck.sh`; if you haven't created it
-(claim check is optional), it prints a harmless "No such file or directory" message.
+starting the Java worker. `startlocalworker.sh` sources `../setclaimcheck.sh` if it exists (claim check is optional).
 
 Start the API and the UX, and open an investment account from the chat. The child workflow will run on
 the Java worker. Send the compliance approval as usual (see
@@ -62,6 +61,10 @@ the Java worker. Send the compliance approval as usual (see
 cd src/temporal_supervisor
 ./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
+
+To try the Java workflow without the chat or an OpenAI key, run the open-account scenarios against it
+(with this worker running, and no other Python worker): `src/temporal_supervisor/startlocalopenaccount.sh Open-Account-Java`.
+See the account opening section of the [Temporal README](../src/temporal_supervisor/README.md).
 
 ## Failure scenarios and tests
 
@@ -102,8 +105,8 @@ cd java
 ./startcloudworker.sh Open-Account-Java
 ```
 
-The Java cloud script can be run from any directory. It sources `../setclaimcheck.sh` (optional, same
-harmless message if missing) and `../setcloudenv.sh`, maps `TEMPORAL_TLS_CLIENT_CERT_PATH` to the
+The Java cloud script can be run from any directory. It sources `../setclaimcheck.sh` (optional, skipped
+if missing) and `../setcloudenv.sh`, maps `TEMPORAL_TLS_CLIENT_CERT_PATH` to the
 `TEMPORAL_CERT_PATH` the Java worker reads, uses the Spring profile `tc`
 (`src/main/resources/application-tc.yaml`), and runs `./gradlew runWorker`. With this profile, the
 claim check Redis comes from `REDIS_HOST` / `REDIS_PORT` (default `localhost:6379`).

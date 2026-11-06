@@ -118,8 +118,8 @@ conversation history and is also used if Claim Check has been enabled.
 Be aware that using a claim check pattern introduces performance costs by doing remote calls to Redis for every payload. 
 Also, make sure your Redis implementation is rock solid as any downtime will directly affect your workflows. 
 
-Claim check is optional. The start scripts source `setclaimcheck.sh` from the repository root; if you
-haven't created it, they print a harmless "No such file or directory" message and run without claim check.
+Claim check is optional. The start scripts source `setclaimcheck.sh` from the repository root when it
+exists; if you haven't created it, they run without claim check.
 
 ## Run Codec Server for Claim Check (optional)
 If you have decided to set up the Claim Check above, you will 
@@ -271,20 +271,26 @@ Here is a sample event history shown in the Temporal UX
    and the child workflow hits a bug in its welcome-bonus code after compliance approval. See
    [Bug in the workflow code](#bug-in-the-workflow-code).
 
-To exercise the account opening workflow on its own, without the agents, `startlocalopenaccount.sh` starts
-the worker in the background and runs `run_open_account_workflow.py`, which opens three accounts for client
-`123` (`Vacation`, `Vacation2`, `Vacation3`). The third one waits for you to send the compliance approval:
+To exercise the account opening workflow on its own, without the chat or the LLM, `startlocalopenaccount.sh`
+starts a local worker without the agents (`SKIP_AGENTS=True`, so no OpenAI key is needed) in the background
+and runs `run_open_account_workflow.py`, which opens three accounts for client `123` (`Vacation`,
+`Vacation2`, `Vacation3`). The third one waits for you to send the compliance approval. The script stops
+the worker it started when the scenarios finish, and can be run from any directory. Temporal and Redis
+must be running, and no other Python worker should be polling the same task queue:
 
 ```bash
-cd src/temporal_supervisor
-./startlocalopenaccount.sh
+src/temporal_supervisor/startlocalopenaccount.sh
 # in another terminal
 cd src/temporal_supervisor
 ./localsendcomplianceapproval.sh testing-open-investment-account-workflow3
 ```
 
-Stop the background worker when you're done. If a worker is already running, use `./testlocalopenaccount.sh`,
-which runs only the scenarios.
+With a task queue name, the workflow runs on that queue (`TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT`), so you
+can run the same scenarios against the Java workflow (start `java/startlocalworker.sh <queue>` first):
+
+```bash
+src/temporal_supervisor/startlocalopenaccount.sh Open-Account-Java
+```
 
 ## Failure scenarios (chaos panel)
 
@@ -454,6 +460,7 @@ continue-as-new in production (see the TODO in `workflows/supervisor_workflow.py
 | `LLM_MAX_CALLS_PER_SECOND` | unset (no limit) | Most model calls per second the Temporal service dispatches from the LLM task queue, e.g. `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh`. |
 | `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Conversation events, chaos flags and claim check (Python components). |
 | `USE_CLAIM_CHECK` | `False` | Enables the claim check codec (set in `setclaimcheck.sh`). |
+| `SKIP_AGENTS` | `False` | Runs the worker without the agents (no supervisor workflow or model calls, so no OpenAI key); set by `startlocalopenaccount.sh`. |
 | `TEMPORAL_ADDRESS` | `127.0.0.1:7233` | Temporal service address. |
 | `TEMPORAL_NAMESPACE` | `default` | Temporal namespace. |
 | `TEMPORAL_TLS_CLIENT_CERT_PATH` / `TEMPORAL_TLS_CLIENT_KEY_PATH` | | mTLS client certificate and key for Temporal Cloud (set in `setcloudenv.sh`). |

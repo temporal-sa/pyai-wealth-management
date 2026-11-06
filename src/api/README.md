@@ -31,10 +31,9 @@ cd src/api
 ./startcloudapi.sh
 ```
 
-Both scripts source `../../setclaimcheck.sh` and `../../setoaikey.sh` (and `startcloudapi.sh` also
+Both scripts source `../../setclaimcheck.sh` (if it exists) and `../../setoaikey.sh` (and `startcloudapi.sh` also
 `../../setcloudenv.sh`), then run `uv run uvicorn api.main:app --reload` with `src` on the `PYTHONPATH`.
-If you haven't created `setclaimcheck.sh` (claim check is optional), the scripts print a harmless
-"No such file or directory" message.
+Claim check is optional: without `setclaimcheck.sh`, the scripts run without it.
 
 The API listens on http://127.0.0.1:8000 (the uvicorn default). It accepts browser requests from
 `http://localhost:3000` and `http://127.0.0.1:3000` (CORS), where the web app runs. Interactive docs are

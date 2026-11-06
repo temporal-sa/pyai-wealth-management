@@ -18,4 +18,8 @@ class ClientHelper:
         self.taskQueue = os.getenv("TEMPORAL_TASK_QUEUE", "PY-AI-Supervisor")
         # Task Queue for Opening a new Account. If this is not set, use the same task queue as the Supervisor
         self.taskQueueOpenAccount = os.getenv("TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT", self.taskQueue)
+        # Run the worker without the agents (no supervisor workflow, no model calls), for the
+        # open-account scenarios in startlocalopenaccount.sh. Like SKIP_OPENAI_PLUGIN in the
+        # OpenAI Agents SDK version: no OpenAI key is needed.
+        self.skipAgents = str_to_bool(os.getenv("SKIP_AGENTS", "False"))
 

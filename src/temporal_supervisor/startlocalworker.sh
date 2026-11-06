@@ -1,5 +1,5 @@
 #!/bin/bash
-source ../../setclaimcheck.sh
+[ -f ../../setclaimcheck.sh ] && source ../../setclaimcheck.sh
 source ../../setoaikey.sh
 # if you pass in a parameter, use that as the task queue
 # for the Open Account workflow
