@@ -68,7 +68,7 @@ Here are your current beneficiaries:
 2. Jane Doe (daughter)
 3. Joan Doe (spouse)
 
-Would you like to add, remove or list your beneficiaries?
+Would you like to add, delete or list your beneficiaries?
 
 [Beneficiary Agent] Enter your message: What investments do I have?
 Here are your current investment accounts:

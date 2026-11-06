@@ -1,8 +1,8 @@
 package io.temporal.demo.wealthmanagement.workflow;
 
 import io.temporal.activity.ActivityOptions;
-import io.temporal.common.RetryOptions;
 import io.temporal.demo.wealthmanagement.activities.UpdateParentWorkflow;
+import io.temporal.demo.wealthmanagement.common.RetryPolicies;
 import io.temporal.demo.wealthmanagement.common.ServerInfo;
 import io.temporal.demo.wealthmanagement.data.WealthManagementClient;
 import io.temporal.demo.wealthmanagement.model.InvestmentAccount;
@@ -25,8 +25,10 @@ import java.util.Optional;
 @WorkflowImpl
 public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountWorkflow {
     // Welcome-bonus promotion: 1% of the initial deposit, up to $500.
-    // Deliberate bug for the "Bug in workflow code" demo: the promo code is "WELCOME-BONUS",
-    // so the lookup in welcomeBonus() returns null. The fix is the line below.
+    // *** Bug-In-Workflow-Code ***
+    // Intentional bug for the "Bug in workflow code" demo: the promo code is "WELCOME-BONUS" (hyphen),
+    // but PROMOTION_RATES is keyed by "WELCOME_BONUS" (underscore), so the lookup in welcomeBonus returns null.
+    // To fix it, uncomment the first line below and comment out the second.
     // private static final Map<String, Double> PROMOTION_RATES = Map.of("WELCOME-BONUS", 0.01);
     private static final Map<String, Double> PROMOTION_RATES = Map.of("WELCOME_BONUS", 0.01);
     private static final double MAX_WELCOME_BONUS = 500.0;
@@ -39,22 +41,20 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     private String currentState = "Initializing";
 
     // The Python activities, on the Python worker's task queue. Retries are unlimited with
-    // a short maximum interval, and the timeout bounds a single attempt, so an outage is
-    // retried for as long as it lasts (same as TOOL_RETRY_POLICY in retry_policies.py).
+    // a short maximum interval (RetryPolicies), and the timeout bounds a single attempt, so an
+    // outage is retried for as long as it lasts.
     private final ActivityStub activityStub = Workflow.newUntypedActivityStub(
             ActivityOptions.newBuilder().
                     setTaskQueue(ServerInfo.getTaskqueue()).
                     setStartToCloseTimeout(Duration.ofSeconds(30)).
-                    setRetryOptions(RetryOptions.newBuilder().
-                            setInitialInterval(Duration.ofSeconds(1)).
-                            setBackoffCoefficient(2).
-                            setMaximumInterval(Duration.ofSeconds(5)).build()).build());
+                    setRetryOptions(RetryPolicies.TOOL_RETRY_OPTIONS).build());
 
     private final UpdateParentWorkflow updateParent = Workflow.newActivityStub(
             UpdateParentWorkflow.class,
             ActivityOptions.newBuilder().
                     setTaskQueue(ServerInfo.getTaskqueueOpenAccount()).
-                    setStartToCloseTimeout(Duration.ofSeconds(5)).build());
+                    setStartToCloseTimeout(Duration.ofSeconds(5)).
+                    setRetryOptions(RetryPolicies.TOOL_RETRY_OPTIONS).build());
 
     /** A completed saga step and the activity call that undoes it. */
     private record Compensation(String description, String activityName, Object[] args) {}
@@ -96,9 +96,9 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     private OpenInvestmentAccountOutput openAccount() {
         double amount = inputs.getInitial_amount();
         double bonus = inputs.getPromo_code() != null ? welcomeBonus() : 0.0;
-        // Idempotency key: stable across activity retries and worker restarts. It
-        // includes the run ID because the workflow ID is reused when the customer
-        // opens an account with the same name again (e.g. after a rollback).
+        // Idempotency key: stable across activity retries and worker restarts. Each
+        // account opening has its own workflow ID; the run ID keeps the key unique even
+        // if a workflow is started again with an ID used before (e.g. by hand).
         String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId() + "-initial-deposit";
         List<Compensation> compensations = new ArrayList<>();
         try {

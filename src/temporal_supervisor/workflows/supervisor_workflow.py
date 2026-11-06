@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import re
 
 from datetime import timedelta
 from typing import List
@@ -146,8 +147,8 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
             #   - Wait for workflow.all_handlers_finished() and drain the pending message and
             #     status queues first, so no customer message or status update is lost.
             #   - Carry the conversation state into the new run: the message history, the
-            #     active agent, the client ID, the account-opening states, and the KYC
-            #     guard's turn tracking.
+            #     active agent, the client ID, the account-opening states and counter, and
+            #     the KYC guard's turn tracking.
             #   - Open-account child workflows are started with ParentClosePolicy.TERMINATE,
             #     which also applies when the parent continues-as-new, so an opening waiting
             #     for KYC or compliance would be terminated. Use ParentClosePolicy.ABANDON and
@@ -225,7 +226,9 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
         if state_input.workflow_id is not None:
             is_active = active == state_input.workflow_id
         else:
-            is_active = bool(active) and active.endswith(f"-{state_input.account_name}")
+            # Child workflow IDs end with the account name and the opening's number
+            is_active = bool(active) and re.search(
+                rf"-{re.escape(state_input.account_name)}-\d+$", active) is not None
         if is_active:
             self.agent_deps.active_account_workflow_id = None
             self.agent_deps.current_client_info = None
@@ -240,6 +243,8 @@ class WealthManagementWorkflow(PydanticAIWorkflow):
 
         # Handoffs quote the customer's own words to the next agent
         self.agent_deps.customer_message = user_input
+        # The KYC check counts customer messages
+        self.agent_deps.turn += 1
 
         current_agent = self._get_current_agent()
         current_input = user_input

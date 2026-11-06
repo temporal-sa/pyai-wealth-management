@@ -32,7 +32,7 @@ def _ctx(customer_message: str, messages: list, kyc_pending: bool = True) -> Run
         client_id="123",
         customer_message=customer_message,
         kyc_pending=kyc_pending,
-        active_account_workflow_id="OpenAccount-test-123-Vacation",
+        active_account_workflow_id="OpenAccount-test-123-Vacation-1",
     )
     return RunContext(deps=deps, model=TestModel(), usage=RunUsage(), messages=messages)
 

@@ -57,9 +57,9 @@ class OpenInvestmentAccountWorkflow:
         """
         amount = inputs.initial_amount
         bonus = self._welcome_bonus(inputs) if inputs.promo_code else 0.0
-        # Idempotency key: stable across activity retries and worker restarts. It
-        # includes the run ID because the workflow ID is reused when the customer
-        # opens an account with the same name again (e.g. after a rollback).
+        # Idempotency key: stable across activity retries and worker restarts. Each
+        # account opening has its own workflow ID; the run ID keeps the key unique even
+        # if a workflow is started again with an ID used before (e.g. by hand).
         transfer_id = f"{workflow.info().workflow_id}-{workflow.info().run_id}-initial-deposit"
         compensations = []  # (description, activity, args)
         try:
@@ -101,8 +101,11 @@ class OpenInvestmentAccountWorkflow:
     @staticmethod
     def _welcome_bonus(inputs: OpenInvestmentAccountInput) -> float:
         """Welcome-bonus promotion: 1% of the initial deposit, up to $500."""
-        # Deliberate bug for the "Bug in workflow code" demo; the fix is
-        # inputs.initial_amount. See README "Failure scenarios".
+        # *** Bug-In-Workflow-Code ***
+        # Intentional bug for the "Bug in workflow code" demo: OpenInvestmentAccountInput has no
+        # initial_deposit field (it's initial_amount), so the line below raises an AttributeError.
+        # To fix it, uncomment the first line below and comment out the second.
+        # See README "Failure scenarios".
         # return min(inputs.initial_amount * 0.01, 500.0)
         return min(inputs.initial_deposit * 0.01, 500.0)
 

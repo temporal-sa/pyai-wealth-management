@@ -21,30 +21,34 @@ from temporal_supervisor.activities.investments import Investments
 from temporal_supervisor.activities.funding import Funding
 from temporal_supervisor.activities.custodian import Custodian
 from temporal_supervisor.model_config import LLM_MAX_CALLS_PER_SECOND, LLM_TASK_QUEUE
-from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
 from temporal_supervisor.workflows.open_account_workflow import OpenInvestmentAccountWorkflow
 
 from temporal_supervisor.claim_check.claim_check_plugin import ClaimCheckPlugin
 
 from temporalio.envconfig import ClientConfig
 
-def choose_workflows(client_helper: ClientHelper) -> Sequence[Type]:
-    # returns the workflows depending if we have one or two task queues
+def choose_workflows(client_helper: ClientHelper, supervisor_workflow: Type | None) -> Sequence[Type]:
+    # returns the workflows depending if we have one or two task queues,
+    # and whether the agents (the supervisor workflow) are skipped
+    workflows = [supervisor_workflow] if supervisor_workflow else []
     if client_helper.taskQueue == client_helper.taskQueueOpenAccount:
-        return [
-            WealthManagementWorkflow,
-            OpenInvestmentAccountWorkflow,
-        ]
-    else:
-        return [
-            WealthManagementWorkflow,
-        ]
+        workflows.append(OpenInvestmentAccountWorkflow)
+    return workflows
 
 async def main():
     logging.basicConfig(level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(filename)s:%(lineno)s | %(message)s")
     
     client_helper = ClientHelper()
+    # Normally the worker runs the supervisor workflow and its agents. To just test the
+    # open account workflow (startlocalopenaccount.sh), SKIP_AGENTS leaves them out: the
+    # agents build their OpenAI model on import, which needs a key. PydanticAIPlugin stays
+    # for its data converter, so payloads are encoded as they are for the chat.
+    if client_helper.skipAgents:
+        WealthManagementWorkflow = None
+        print("******* Skipping the agents (SKIP_AGENTS=True): no supervisor workflow or model calls *******")
+    else:
+        from temporal_supervisor.workflows.supervisor_workflow import WealthManagementWorkflow
     plugins = [ PydanticAIPlugin(), ClaimCheckPlugin() ]
     print(f"address is {client_helper.address} and plugins are {plugins}")
     client = await Client.connect(**client_helper.client_config,
@@ -56,7 +60,7 @@ async def main():
     worker = Worker(
         client,
         task_queue=client_helper.taskQueue, 
-        workflows=choose_workflows(client_helper),
+        workflows=choose_workflows(client_helper, WealthManagementWorkflow),
         activities=[
             Investments.list_investments,
             Investments.validate_new_account,
@@ -79,6 +83,11 @@ async def main():
             LocalActivities.get_task_queue_open_account,
         ],
     )
+
+    if WealthManagementWorkflow is None:
+        print(f"Running worker on {client_helper.address}, task queue {client_helper.taskQueue}")
+        await worker.run()
+        return
 
     # Model calls run on their own task queue so they can be rate limited without
     # slowing down the tools. The limit is enforced by the Temporal service across

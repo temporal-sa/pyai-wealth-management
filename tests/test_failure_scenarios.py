@@ -329,9 +329,9 @@ def test_client_id_tools_run_in_the_workflow():
 
 
 async def test_reopening_after_a_rollback_debits_again(temporal_env, tmp_path):
-    # The parent reuses the child workflow ID when an account with the same name is
-    # opened again, so the transfer ID has to differ per run. Otherwise the ledger
-    # treats the second debit as a retry of the first and no money moves.
+    # Each account opening gets its own child workflow ID, but a workflow started again
+    # with an ID used before must still debit again: the transfer ID differs per run.
+    # Otherwise the ledger treats the second debit as a retry of the first and no money moves.
     funding_file = tmp_path / "funding.json"
     funding_file.write_text(json.dumps({"accounts": {CLIENT_ID: {"name": "Bank", "balance": 10_000.0}}}))
 
@@ -425,7 +425,7 @@ async def test_supervisor_clears_the_old_conversation_and_records_status_updates
             WealthManagementWorkflow.run, id=workflow_id, task_queue=task_queue)
         await handle.signal(WealthManagementWorkflow.update_account_opening_state,
                             UpdateAccountOpeningStateInput(account_name="Vacation", state="Complete",
-                                                           workflow_id="OpenAccount-x-123-Vacation"))
+                                                           workflow_id="OpenAccount-x-123-Vacation-1"))
 
         # An ended account opening adds a note to the conversation.
         for _ in range(50):

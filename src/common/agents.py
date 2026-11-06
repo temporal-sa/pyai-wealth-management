@@ -19,7 +19,7 @@ from common.investment_manager import InvestmentManager, InvestmentAccount
 from common.domain_classes import OpenInvestmentAccountInput, WealthManagementClient
 
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.workflow import ParentClosePolicy
 from temporalio.client import Client, WorkflowHandle
 
@@ -68,6 +68,14 @@ class AgentDependencies:
     # Latest state reported by each open-account child workflow, keyed by its
     # workflow ID. Updated by the update_account_opening_state signal.
     account_opening_states: dict[str, str] = field(default_factory=dict)
+    # Account openings started so far in this conversation. Each opening's child
+    # workflow ID ends with its number, so every request opens a new one.
+    account_openings_started: int = 0
+    # Customer messages so far (set by the chat workflow), and the message in which
+    # each account opening's KYC details were shown, keyed by its workflow ID. KYC is
+    # only approved in a later message, so one opening's confirmation can't approve another.
+    turn: int = 0
+    kyc_shown_turn: dict[str, int] = field(default_factory=dict)
 
 ### Handoff helpers
 
@@ -255,7 +263,7 @@ async def respond_about_beneficiaries(ctx: RunContext[AgentDependencies], respon
                 response = response.replace('\\n', '\n')
 
             # Ensure the required ending question is present
-            required_ending = "Would you like to add, remove or list your beneficiaries?"
+            required_ending = "Would you like to add, delete or list your beneficiaries?"
             if required_ending not in response:
                 # Add it if missing (non-crashing fallback)
                 if not response.endswith('\n'):
@@ -508,12 +516,7 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
 
         try:
             # 1. Start the child workflow automatically by calling the tool function directly
-            try:
-                workflow_id = await start_account_opening_workflow(ctx, account_info)
-            except WorkflowAlreadyStartedError:
-                ctx.deps.pending_account_info = None
-                return (f"Your {account_info.account_name} account is already being opened. "
-                        f"Its status updates will appear here as it progresses.")
+            workflow_id = await start_account_opening_workflow(ctx, account_info)
             workflow.logger.info(f"Started workflow: {workflow_id}")
 
             # Store workflow_id in deps so agent can access it for subsequent operations
@@ -549,6 +552,7 @@ Is this information correct and up to date? Please confirm.
             # Clear pending_account_info since we've processed it
             ctx.deps.pending_account_info = None
             ctx.deps.kyc_pending = True
+            ctx.deps.kyc_shown_turn[workflow_id] = ctx.deps.turn
             workflow.logger.info("Cleared pending_account_info")
 
         except Exception as e:
@@ -564,52 +568,6 @@ async def get_workflow_handle(workflow_id) -> WorkflowHandle:
     the_client = await Client.connect(**client_helper.client_config,
                                       plugins=[ PydanticAIPlugin(), ClaimCheckPlugin() ])
     return the_client.get_workflow_handle_for(OpenInvestmentAccountWorkflow.run, workflow_id)
-
-async def open_new_investment_account(ctx: RunContext[AgentDependencies], account_input: OpenInvestmentAccountInput) -> str:
-    """
-    Open a new investment account by starting a child workflow.
-
-    When running inside a Temporal workflow, this directly starts a child workflow
-    for the account opening process.
-
-    Args:
-        account_input: The account details (client_id, account_name, initial_amount)
-
-    Returns:
-        Success message with child workflow ID or error message
-    """
-    try:
-        # When running inside a Temporal workflow context, we can access workflow functions
-        if workflow.in_workflow():
-            # Get the task queue from deps (set by the workflow)
-            task_queue = ctx.deps.task_queue_open_account
-            if not task_queue:
-                raise ValueError("task_queue_open_account not set in AgentDependencies")
-
-            # Get the current workflow's ID to create a unique child workflow ID
-            current_workflow_id = workflow.info().workflow_id
-            child_workflow_id = f"OpenAccount-{current_workflow_id}-{account_input.client_id}-{account_input.account_name}"
-
-            workflow.logger.info(f"Starting open account child workflow with ID: {child_workflow_id} on task queue: {task_queue}")
-
-            # Start the child workflow directly - runs at workflow level!
-            await workflow.start_child_workflow(
-                OpenInvestmentAccountWorkflow.run,
-                args=[account_input],
-                id=child_workflow_id,
-                parent_close_policy=ParentClosePolicy.TERMINATE,
-                task_queue=task_queue
-            )
-
-            return f"Your account opening request has been submitted. Workflow ID: {child_workflow_id}"
-        else:
-            # Fallback for non-workflow contexts (testing, etc.)
-            logger.warning("open_new_investment_account called outside workflow context")
-            return "Account opening is only available when running in a workflow context."
-
-    except Exception as e:
-        logger.error(f"Error starting account opening workflow: {e}")
-        return f"I encountered a problem starting the account opening process. Please try again. (Debug: {str(e)})"
 
 async def get_current_client_info(workflow_id: str) -> WealthManagementClient:
     # get the handle from the workflow id
@@ -764,21 +722,21 @@ async def list_beneficiaries(
 @beneficiary_agent.tool
 async def delete_beneficiaries(
         context: RunContext[AgentDependencies],
-        first_name: str,
-        last_name: str,
+        beneficiary_id: str,
         user_confirmed: bool = False):
         """
-        Delete a beneficiary by their name. REQUIRES user confirmation before calling this.
+        Delete a beneficiary by their beneficiary id. REQUIRES user confirmation before calling this.
+
+        Use the beneficiary id from list_beneficiaries that is mapped to the customer's choice.
 
         CRITICAL: You MUST call this tool after the user confirms deletion.
-        Do NOT just say "I will proceed to remove" - actually call this tool!
+        Do NOT just say "I will proceed to delete" - actually call this tool!
 
         IMPORTANT: When calling this tool after user confirmation, you MUST set user_confirmed=True.
-        Example: delete_beneficiaries(first_name="Junior", last_name="Doe", user_confirmed=True)
+        Example: delete_beneficiaries(beneficiary_id="b-1a2b3c4d", user_confirmed=True)
 
         Args:
-            first_name: The first name of the beneficiary to delete (e.g., "Junior")
-            last_name: The last name of the beneficiary to delete (e.g., "Doe")
+            beneficiary_id: The beneficiary id (from list_beneficiaries) of the beneficiary to delete
             user_confirmed: Set to True when the user has explicitly confirmed the deletion (default: False)
 
         Returns:
@@ -789,44 +747,36 @@ async def delete_beneficiaries(
             raise ModelRetry(
                 "CRITICAL ERROR: You attempted to delete a beneficiary WITHOUT user confirmation. "
                 "You MUST:\n"
-                "1. Ask: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                "1. Ask: 'Are you sure you want to delete [Name]? Please confirm.'\n"
                 "2. Wait for user response\n"
                 "3. When user confirms (says 'yes', 'confirm', etc.), call this tool with user_confirmed=True\n\n"
-                "Example: delete_beneficiaries(first_name=\"Junior\", last_name=\"Doe\", user_confirmed=True)\n\n"
+                "Example: delete_beneficiaries(beneficiary_id=\"b-1a2b3c4d\", user_confirmed=True)\n\n"
                 "Do NOT call this tool again until the user has confirmed."
             )
 
         # The model sometimes passes user_confirmed=True on the request itself
         if is_unconfirmed_request(context, ("remove", "delete")):
             raise ModelRetry(
-                "CRITICAL ERROR: The customer's latest message was a remove REQUEST, not a confirmation. "
+                "CRITICAL ERROR: The customer's latest message was a delete REQUEST, not a confirmation. "
                 f"Their message: '{context.deps.customer_message}'\n\n"
                 "This is Step 1, not Step 2! You MUST:\n"
-                "1. First ASK: 'Are you sure you want to remove [Name]? Please confirm.'\n"
+                "1. First ASK: 'Are you sure you want to delete [Name]? Please confirm.'\n"
                 "2. WAIT for user to respond with 'yes', 'confirm', etc.\n"
                 "3. ONLY THEN call this tool with user_confirmed=True\n\n"
                 "Do NOT call this tool until the user explicitly confirms!"
             )
 
-        # Look up the beneficiary by name to get the ID
         await core_banking_api()
         beneficiaries = beneficiaries_mgr.list_beneficiaries(context.deps.client_id)
-        full_name = f"{first_name} {last_name}".lower()
+        matching = next((b for b in beneficiaries if b['beneficiary_id'] == beneficiary_id), None)
+        if not matching:
+            return (f"ERROR: No beneficiary with id '{beneficiary_id}'. Call list_beneficiaries and use "
+                    "the beneficiary id mapped to the customer's choice.")
 
-        matching_beneficiary = None
-        for bene in beneficiaries:
-            bene_full_name = f"{bene['first_name']} {bene['last_name']}".lower()
-            if bene_full_name == full_name:
-                matching_beneficiary = bene
-                break
-
-        if not matching_beneficiary:
-            return f"ERROR: Could not find beneficiary named '{first_name} {last_name}'"
-
-        beneficiary_id = matching_beneficiary['beneficiary_id']
-        debug_print(f"Tool: Deleting beneficiary {first_name} {last_name} (ID: {beneficiary_id}) from account {context.deps.client_id}")
+        name = f"{matching['first_name']} {matching['last_name']}"
+        debug_print(f"Tool: Deleting beneficiary {name} (ID: {beneficiary_id}) from account {context.deps.client_id}")
         beneficiaries_mgr.delete_beneficiary(context.deps.client_id, beneficiary_id)
-        return f"Successfully deleted {first_name} {last_name}"
+        return f"Successfully deleted {name}"
 
 
 @investment_agent.tool
@@ -860,19 +810,6 @@ async def list_investments(
     await core_banking_api()
     return InvestmentManager().list_investment_accounts(context.deps.client_id)
 
-
-# @investment_agent.tool
-# async def open_investment(context: RunContext[AgentDependencies],
-#     name: str, balance: float):
-#     """
-#     Adds a new investment account for the given information
-#     """
-#     investment_account = InvestmentAccount(
-#         client_id=context.deps.client_id,
-#         name=name,
-#         balance=balance)
-
-#     return InvestmentManager().add_investment_account(investment_account)
 
 @investment_agent.tool
 async def close_investment(context: RunContext[AgentDependencies],
@@ -933,11 +870,15 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
     Start a new investment account opening workflow.
     Returns the workflow ID which you'll need for subsequent operations.
 
+    Every call starts a new account opening, even for an account name opened (or being
+    opened) earlier in this conversation: the workflow ID ends with the opening's number.
+
     Args:
         account_input: The account details (client_id, account_name, initial_amount)
 
     Returns:
-        The workflow ID (format: "OpenAccount-{parent_workflow_id}-{client_id}-{account_name}")
+        The workflow ID (format: "OpenAccount-{parent_workflow_id}-{client_id}-{account_name}-{n}",
+        n being the number of account openings started in this conversation, this one included)
     """
     try:
         if not workflow.in_workflow():
@@ -948,7 +889,9 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
             raise ValueError("task_queue_open_account not set in AgentDependencies")
 
         current_workflow_id = workflow.info().workflow_id
-        child_workflow_id = f"OpenAccount-{current_workflow_id}-{account_input.client_id}-{account_input.account_name}"
+        opening_number = ctx.deps.account_openings_started + 1
+        child_workflow_id = (f"OpenAccount-{current_workflow_id}-{account_input.client_id}-"
+                             f"{account_input.account_name}-{opening_number}")
 
         workflow.logger.info(f"Starting open account child workflow with ID: {child_workflow_id}")
 
@@ -959,6 +902,11 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
             parent_close_policy=ParentClosePolicy.TERMINATE,
             task_queue=task_queue
         )
+        # Counted only once the opening has started
+        ctx.deps.account_openings_started = opening_number
+        # Known from the start, so a status check right away doesn't report "not found"
+        # before the child's first state update arrives.
+        ctx.deps.account_opening_states.setdefault(child_workflow_id, "Initializing")
 
         return child_workflow_id
     except Exception as e:
@@ -986,6 +934,19 @@ async def get_account_opening_status(ctx: RunContext[AgentDependencies], workflo
     return state
 
 
+def kyc_not_confirmed_yet(deps: AgentDependencies, workflow_id: str) -> Optional[str]:
+    """Why KYC can't be approved for this account opening yet, or None if it can.
+
+    The customer must have seen this opening's details and replied since: a confirmation
+    given for an earlier account opening doesn't count for a new one.
+    """
+    shown_turn = deps.kyc_shown_turn.get(workflow_id)
+    if shown_turn is None or shown_turn >= deps.turn:
+        return ("KYC was not approved: the customer has not yet confirmed their details for this account "
+                "opening. They have just been shown; wait for the customer's next message.")
+    return None
+
+
 @open_account_agent.tool
 async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:
     """
@@ -1001,6 +962,8 @@ async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:
 
     if not workflow_id:
         return "Error: No active account opening workflow found. Please start the account opening process first."
+    if refusal := kyc_not_confirmed_yet(ctx.deps, workflow_id):
+        return refusal
 
     logger.info(f"approve_client_kyc: Calling approve_kyc with workflow_id: {workflow_id}")
     await approve_kyc(workflow_id)
@@ -1033,6 +996,8 @@ async def update_kyc_details(ctx: RunContext[AgentDependencies], client_details:
     workflow_id = ctx.deps.active_account_workflow_id
     if not workflow_id:
         return "Error: No active account opening workflow found. Please start the account opening process first."
+    if refusal := kyc_not_confirmed_yet(ctx.deps, workflow_id):
+        return refusal
 
     # Check if original client info is available for merging
     if not ctx.deps.current_client_info:
