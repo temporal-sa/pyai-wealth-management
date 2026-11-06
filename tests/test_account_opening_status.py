@@ -46,7 +46,7 @@ def _session(account_name="Vacation"):
     deps = AgentDependencies(
         client_id="123",
         current_agent_name=OPEN_ACCOUNT_AGENT_NAME,
-        active_account_workflow_id=f"OpenAccount-session-123-{account_name}",
+        active_account_workflow_id=f"OpenAccount-session-123-{account_name}-1",
         kyc_pending=True,
     )
     return SimpleNamespace(agent_deps=deps, message_history=[])
@@ -108,10 +108,10 @@ def test_the_investment_agent_takes_over_once_the_account_opening_ends():
 def test_the_workflow_id_identifies_the_account_opening_that_ended():
     session = _session("Vacation")
     # Same account name, but a different account opening.
-    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-other-session-123-Vacation")
-    assert session.agent_deps.active_account_workflow_id == "OpenAccount-session-123-Vacation"
+    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-session-123-Vacation-2")
+    assert session.agent_deps.active_account_workflow_id == "OpenAccount-session-123-Vacation-1"
 
-    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-session-123-Vacation")
+    _end(session, "Vacation", "Complete", workflow_id="OpenAccount-session-123-Vacation-1")
     assert session.agent_deps.active_account_workflow_id is None
 
 
@@ -120,7 +120,7 @@ def test_another_accounts_opening_is_left_alone():
     _end(session, "Vacation", "Complete")
 
     deps = session.agent_deps
-    assert deps.active_account_workflow_id == "OpenAccount-session-123-Boat"
+    assert deps.active_account_workflow_id == "OpenAccount-session-123-Boat-1"
     assert deps.kyc_pending
     assert deps.current_agent_name == OPEN_ACCOUNT_AGENT_NAME
 

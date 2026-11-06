@@ -223,12 +223,15 @@ cd src/temporal_supervisor
 
 ### Finding the child workflow ID
 
-The child workflow ID has the format `OpenAccount-<chat workflow ID>-<client ID>-<account name>`, for example
-`OpenAccount-pyai-temporal-agent-abc123-123-Vacation` (the web app gives each chat a random workflow ID
-starting with `pyai-temporal-agent-`). Quote it if the account name contains a space.
+The child workflow ID has the format `OpenAccount-<chat workflow ID>-<client ID>-<account name>-<n>`, for example
+`OpenAccount-pyai-temporal-agent-abc123-123-Vacation-1` (the web app gives each chat a random workflow ID
+starting with `pyai-temporal-agent-`). `<n>` counts the account openings started in the chat (1, 2, 3, ...):
+every request to open an account starts a new account opening, with its own KYC confirmation, even if an
+account with the same name was opened, or is still being opened, earlier in the chat. Quote the ID if the
+account name contains a space.
 
 It is shown at the end of the agent's reply when it asks you to confirm your information, for example
-`(Workflow ID: OpenAccount-pyai-temporal-agent-abc123-123-Vacation)`. You can also find it in the Temporal UI
+`(Workflow ID: OpenAccount-pyai-temporal-agent-abc123-123-Vacation-1)`. You can also find it in the Temporal UI
 (http://localhost:8233 locally): look for the running `OpenInvestmentAccountWorkflow`, which is a child of
 the chat's `WealthManagementWorkflow`.
 
@@ -248,14 +251,17 @@ Here is a sample event history shown in the Temporal UX
    `validate_new_account` activity (business rules: $100 to $1,000,000) and the `find_promotion` activity,
    then starts the `OpenInvestmentAccountWorkflow` child workflow (`start_account_opening_workflow`) on the
    `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` task queue. The child workflow is started from workflow code, not from
-   a tool, because Pydantic AI runs tools as activities. Only one opening per account name per chat can run
-   at a time.
+   a tool, because Pydantic AI runs tools as activities. Every request to open an account starts a new
+   child workflow (its ID ends with the opening's number in the chat), even for an account name opened, or
+   still being opened, earlier in the chat, so two openings of the same name can run at once.
 3. KYC: the child workflow loads the client's details (`get_client` activity). The agent fetches them with
    the `get_client_details` update (via the `get_current_client_info` activity), shows them to the customer
    with the child workflow ID, and asks them to confirm. In a later message the customer either confirms,
    and the agent calls `approve_client_kyc` (the `verify_kyc` signal), or gives new details, and the agent
    calls `update_kyc_details` (the `update_client_details` update, which saves them with the
-   `update_client` activity and also completes KYC).
+   `update_client` activity and also completes KYC). Each opening needs its own confirmation: these tools
+   refuse to approve an opening whose details were shown in the same message, so a confirmation given for
+   an earlier opening never approves a new one.
 4. The child workflow then waits for the `compliance_approved` signal, which you send with
    `localsendcomplianceapproval.sh` / `cloudsendcomplianceapproval.sh`.
 5. After approval it runs a saga: create the account record (`open_investment`), transfer the deposit from
@@ -397,6 +403,18 @@ LIVE_TEST_RUNS=10 uv run pytest tests/live_agent_handoffs.py -s
 ```
 
 `LIVE_TEST_RUNS=<n>` repeats the conversation n times in one test (default 1), since model output varies.
+
+`tests/live_repeat_opening.py` checks, the same way, that asking to open an account again starts a new
+account opening with its own KYC. The conversation is "Who are my beneficiaries?", "123", "What investments
+do I have?", "Open Vacation with $13,000", "Yes", then "Open Vacation with $13,000" again. Both replies to the
+open request must show client 123's details (Don, 123 Main Street), and two child workflows must be started,
+with IDs ending `-Vacation-1` and `-Vacation-2`. It also runs the real `OpenInvestmentAccountWorkflow`
+(compliance is never approved, so no data file is written):
+
+```bash
+source ./setoaikey.sh
+LIVE_TEST_RUNS=3 uv run pytest tests/live_repeat_opening.py -s
+```
 
 For the Java workflow (JDK 25):
 

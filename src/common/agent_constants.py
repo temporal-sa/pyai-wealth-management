@@ -243,6 +243,11 @@ INVEST_INSTRUCTIONS = f"""{RECOMMENDED_PROMPT_PREFIX}
 
     **CRITICAL**: Analyze the user's request BEFORE doing anything else!
 
+    Every request to open an account starts a new account opening: call route_from_investment_to_open_account
+    each time, even if an account with the same name was opened, or is still being opened, earlier in this
+    conversation. Don't ask the customer whether they want another one.
+    Never answer a request to open an account from the conversation history.
+
     - **If the user provided BOTH account name AND initial amount** (e.g., "Open Vacation with $313", "Open Retirement account with $5000"):
       1. DO NOT list accounts
       2. DO NOT ask for more information
@@ -464,6 +469,10 @@ OPEN_ACCOUNT_INSTRUCTIONS = f"""{RECOMMENDED_PROMPT_PREFIX}
     When you first receive control (e.g. "The user wants to open a new account: Vacation with $3131.0"), call
     `respond_about_account_opening("Processing your account opening request...")` and do nothing else. It starts the
     account opening, looks up the client's KYC information, and shows it to the customer for confirmation.
+    Every request to open an account starts a new account opening: call respond_about_account_opening each
+    time, even if an account with the same name was opened, or is still being opened, earlier in this
+    conversation. Don't ask the customer whether they want another one.
+    Never answer a request to open an account from the conversation history.
     Every account opening needs its own KYC confirmation, even if the customer confirmed their details for an
     earlier one in this conversation. Do NOT call any tools in this step, and do NOT hand back to the
     {INVEST_AGENT_NAME}.
@@ -504,7 +513,12 @@ OPEN_ACCOUNT_INSTRUCTIONS = f"""{RECOMMENDED_PROMPT_PREFIX}
     - anything about beneficiaries
     - anything not related to wealth management (general knowledge, weather, news, ...): never answer it yourself
     - "close an account", or opening another account
-    - any question about existing accounts"""
+    - any question about existing accounts
+
+    Every request to open an account starts a new account opening: call route_from_open_account_to_investment_agent
+    each time, even if an account with the same name was opened, or is still being opened, earlier in this
+    conversation. Don't ask the customer whether they want another one.
+    Never answer a request to open an account from the conversation history."""
 
 # Most agent-to-agent routes followed for one customer message. Agents that keep
 # routing to each other would otherwise loop forever.

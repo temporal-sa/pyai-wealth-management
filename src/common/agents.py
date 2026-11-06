@@ -19,7 +19,7 @@ from common.investment_manager import InvestmentManager, InvestmentAccount
 from common.domain_classes import OpenInvestmentAccountInput, WealthManagementClient
 
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.workflow import ParentClosePolicy
 from temporalio.client import Client, WorkflowHandle
 
@@ -68,6 +68,14 @@ class AgentDependencies:
     # Latest state reported by each open-account child workflow, keyed by its
     # workflow ID. Updated by the update_account_opening_state signal.
     account_opening_states: dict[str, str] = field(default_factory=dict)
+    # Account openings started so far in this conversation. Each opening's child
+    # workflow ID ends with its number, so every request opens a new one.
+    account_openings_started: int = 0
+    # Customer messages so far (set by the chat workflow), and the message in which
+    # each account opening's KYC details were shown, keyed by its workflow ID. KYC is
+    # only approved in a later message, so one opening's confirmation can't approve another.
+    turn: int = 0
+    kyc_shown_turn: dict[str, int] = field(default_factory=dict)
 
 ### Handoff helpers
 
@@ -508,12 +516,7 @@ async def respond_about_account_opening(ctx: RunContext[AgentDependencies], resp
 
         try:
             # 1. Start the child workflow automatically by calling the tool function directly
-            try:
-                workflow_id = await start_account_opening_workflow(ctx, account_info)
-            except WorkflowAlreadyStartedError:
-                ctx.deps.pending_account_info = None
-                return (f"Your {account_info.account_name} account is already being opened. "
-                        f"Its status updates will appear here as it progresses.")
+            workflow_id = await start_account_opening_workflow(ctx, account_info)
             workflow.logger.info(f"Started workflow: {workflow_id}")
 
             # Store workflow_id in deps so agent can access it for subsequent operations
@@ -549,6 +552,7 @@ Is this information correct and up to date? Please confirm.
             # Clear pending_account_info since we've processed it
             ctx.deps.pending_account_info = None
             ctx.deps.kyc_pending = True
+            ctx.deps.kyc_shown_turn[workflow_id] = ctx.deps.turn
             workflow.logger.info("Cleared pending_account_info")
 
         except Exception as e:
@@ -866,11 +870,15 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
     Start a new investment account opening workflow.
     Returns the workflow ID which you'll need for subsequent operations.
 
+    Every call starts a new account opening, even for an account name opened (or being
+    opened) earlier in this conversation: the workflow ID ends with the opening's number.
+
     Args:
         account_input: The account details (client_id, account_name, initial_amount)
 
     Returns:
-        The workflow ID (format: "OpenAccount-{parent_workflow_id}-{client_id}-{account_name}")
+        The workflow ID (format: "OpenAccount-{parent_workflow_id}-{client_id}-{account_name}-{n}",
+        n being the number of account openings started in this conversation, this one included)
     """
     try:
         if not workflow.in_workflow():
@@ -881,7 +889,9 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
             raise ValueError("task_queue_open_account not set in AgentDependencies")
 
         current_workflow_id = workflow.info().workflow_id
-        child_workflow_id = f"OpenAccount-{current_workflow_id}-{account_input.client_id}-{account_input.account_name}"
+        opening_number = ctx.deps.account_openings_started + 1
+        child_workflow_id = (f"OpenAccount-{current_workflow_id}-{account_input.client_id}-"
+                             f"{account_input.account_name}-{opening_number}")
 
         workflow.logger.info(f"Starting open account child workflow with ID: {child_workflow_id}")
 
@@ -892,6 +902,11 @@ async def start_account_opening_workflow(ctx: RunContext[AgentDependencies], acc
             parent_close_policy=ParentClosePolicy.TERMINATE,
             task_queue=task_queue
         )
+        # Counted only once the opening has started
+        ctx.deps.account_openings_started = opening_number
+        # Known from the start, so a status check right away doesn't report "not found"
+        # before the child's first state update arrives.
+        ctx.deps.account_opening_states.setdefault(child_workflow_id, "Initializing")
 
         return child_workflow_id
     except Exception as e:
@@ -919,6 +934,19 @@ async def get_account_opening_status(ctx: RunContext[AgentDependencies], workflo
     return state
 
 
+def kyc_not_confirmed_yet(deps: AgentDependencies, workflow_id: str) -> Optional[str]:
+    """Why KYC can't be approved for this account opening yet, or None if it can.
+
+    The customer must have seen this opening's details and replied since: a confirmation
+    given for an earlier account opening doesn't count for a new one.
+    """
+    shown_turn = deps.kyc_shown_turn.get(workflow_id)
+    if shown_turn is None or shown_turn >= deps.turn:
+        return ("KYC was not approved: the customer has not yet confirmed their details for this account "
+                "opening. They have just been shown; wait for the customer's next message.")
+    return None
+
+
 @open_account_agent.tool
 async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:
     """
@@ -934,6 +962,8 @@ async def approve_client_kyc(ctx: RunContext[AgentDependencies]) -> str:
 
     if not workflow_id:
         return "Error: No active account opening workflow found. Please start the account opening process first."
+    if refusal := kyc_not_confirmed_yet(ctx.deps, workflow_id):
+        return refusal
 
     logger.info(f"approve_client_kyc: Calling approve_kyc with workflow_id: {workflow_id}")
     await approve_kyc(workflow_id)
@@ -966,6 +996,8 @@ async def update_kyc_details(ctx: RunContext[AgentDependencies], client_details:
     workflow_id = ctx.deps.active_account_workflow_id
     if not workflow_id:
         return "Error: No active account opening workflow found. Please start the account opening process first."
+    if refusal := kyc_not_confirmed_yet(ctx.deps, workflow_id):
+        return refusal
 
     # Check if original client info is available for merging
     if not ctx.deps.current_client_info:

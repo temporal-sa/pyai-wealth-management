@@ -175,8 +175,8 @@ class OpenInvestmentAccountWorkflowTest {
 
     @Test
     void reopenAfterRollbackUsesANewTransferId() {
-        // The parent reuses the workflow ID when an account with the same name is opened
-        // again, so the transfer ID must differ per run or the second debit is a no-op.
+        // Each account opening gets its own workflow ID, but a workflow started again with
+        // an ID used before must still debit again: the transfer ID differs per run.
         String workflowId = "open-account-test-" + UUID.randomUUID();
         failures.put("register_account", "reject");
         OpenInvestmentAccountWorkflow first = startAndApprove(null, workflowId);
