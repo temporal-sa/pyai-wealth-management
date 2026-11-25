@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This repository is no longer maintained.** The Pydantic AI version of the Wealth Management demo now lives in
+> [temporal-sa/wealth-management-demo](https://github.com/temporal-sa/wealth-management-demo), under
+> [`src/python/pyai`](https://github.com/temporal-sa/wealth-management-demo/tree/main/src/python/pyai). There it sits
+> alongside the same demo in twelve other agent frameworks across Python, TypeScript, Go, Java and .NET, with one shared
+> web UI and new features such as a chaos panel for injecting failures. New work, fixes and SDK upgrades happen there;
+> this repository is kept as it is for reference.
+
 # Wealth Management Agent Example using Pydantic AI Framework
 
 This project demonstrates how to use [Pydantic AI Framework](https://ai.pydantic.dev/) 
